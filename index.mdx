@@ -1,0 +1,162 @@
+---
+title: "IoT Systems"
+description: "Build complete IoT systems from sensor to cloud. Eight lessons covering IoT architecture, MQTT brokers, multi-MCU clients, real-time dashboards, REST APIs, alerts and automation, device security, and a production monitoring capstone."
+pubDate: 2026-03-10
+tags: ["iot", "mqtt", "sensors", "dashboards", "rest-api", "security", "automation", "esp32", "raspberry-pi", "siliconwit-io"]
+excerpt: "Connect embedded devices to the cloud and build production IoT systems. Learn MQTT from broker setup to multi-MCU clients, build real-time dashboards, design REST APIs with webhooks, configure alerts and automation, secure devices with TLS and provisioning, and deploy a complete production monitoring system."
+heroImage: "https://cdn.siliconwit.com/education/iot-systems/iot-systems-overview.png"
+---
+
+import Copyright from '../../../../components/Copyright.astro';
+import TawkWidget from '../../../../components/TawkWidget.astro';
+import { Card, CardGrid, Badge, Steps } from '@astrojs/starlight/components';
+
+The previous courses in this series taught you to program microcontrollers, write RTOS tasks, build custom Linux images, and read sensors over I2C/SPI/UART. But a sensor that only logs to serial is not an IoT device. IoT means the data reaches a broker, gets stored, triggers alerts, appears on dashboards, and drives decisions, whether the operator is in the next room or on another continent. This course teaches you to build that entire pipeline. #IoT #MQTT #ConnectedDevices
+
+## Why a Dedicated IoT Course?
+
+The embedded courses touched networking (ESP32 Wi-Fi, RPi Pico W, Embedded Linux MQTT bridge), but always as a side topic. Building a reliable, secure, production-grade IoT system requires its own set of skills:
+
+<CardGrid>
+  <Card title="Protocol Fluency" icon="star">
+    MQTT, CoAP, and HTTP each have trade-offs in bandwidth, latency, battery, and reliability. You need to know when to use each and why. Lesson 1 benchmarks all three with the same sensor data so you can make informed decisions.
+  </Card>
+
+  <Card title="Broker Infrastructure" icon="setting">
+    A broker is the backbone of any MQTT system. You will set up Mosquitto from scratch with TLS, authentication, ACLs, and persistence. You will also connect to cloud platforms like [SiliconWit.io](https://siliconwit.io), a connected operations platform that accepts MQTT connections and provides dashboards, alerts, automation, and REST API access. You will understand both self-hosted and managed options.
+  </Card>
+
+  <Card title="End-to-End Visibility" icon="approve-check">
+    Raw sensor data is useless without visualization and alerting. You will build dashboards with Grafana and InfluxDB, configure threshold alerts that notify via email, SMS, or Slack, and design automation rules that act without human intervention.
+  </Card>
+
+  <Card title="Security From Day One" icon="warning">
+    Most IoT tutorials skip security. This course dedicates an entire lesson to TLS, mutual authentication, certificate management, device provisioning, and firmware signing. Because an insecure IoT device is worse than no device at all.
+  </Card>
+</CardGrid>
+
+## Course Structure
+
+Each lesson follows a consistent cycle:
+
+<Steps>
+1. **The IoT Problem**
+   A real connectivity, data, or operations challenge. Not "blink an LED over Wi-Fi" but "build a dashboard that alerts you when a greenhouse sensor goes offline."
+
+2. **Protocol and Architecture**
+   How the relevant protocol or pattern works: MQTT publish/subscribe, REST request/response, webhook push, TLS handshake.
+
+3. **Build and Configure**
+   Set up the infrastructure (broker, database, dashboard) and write the firmware and backend code.
+
+4. **Deploy and Test**
+   Flash MCUs, verify data flow end-to-end, simulate failures, and confirm recovery.
+
+5. **Production Considerations**
+   What changes at scale: connection pooling, message queuing, retry logic, monitoring, and cost.
+</Steps>
+
+## Lessons
+
+<CardGrid>
+  <Card title="Lesson 1: IoT Architecture and Protocol Comparison" icon="star">
+    [IoT Architecture and Protocol Comparison](./iot-architecture-protocol-comparison). Survey IoT system architectures and compare MQTT, CoAP, and HTTP side by side. Send the same BME280 sensor data over all three protocols and measure bandwidth, latency, and power consumption.
+    **Build:** Protocol comparison bench on ESP32. **Parts:** ESP32, BME280 (reuse).
+  </Card>
+
+  <Card title="Lesson 2: MQTT Broker Setup and Secure Connections" icon="document">
+    [MQTT Broker Setup and Secure Connections](./mqtt-broker-setup-secure-connection). Install and configure Mosquitto with TLS, password authentication, and topic ACLs. Connect to both your self-hosted broker and the SiliconWit.io connected operations platform. Understand retained messages, last will, QoS levels, and persistence.
+    **Build:** Production-ready Mosquitto broker with TLS. **Parts:** Raspberry Pi or any Linux machine.
+  </Card>
+
+  <Card title="Lesson 3: MQTT Clients on ESP32, Pico, and STM32" icon="document">
+    [MQTT Clients on ESP32, Pico, and STM32](./mqtt-clients-esp32-pico-stm32). Write standard MQTT client firmware for three different MCU platforms. Design a consistent topic hierarchy, handle reconnection gracefully, and publish structured JSON payloads with QoS 1.
+    **Build:** Three-MCU sensor network publishing to one broker. **Parts:** ESP32, RPi Pico W, STM32 + ESP01 (reuse).
+  </Card>
+
+  <Card title="Lesson 4: Real-Time Dashboards and Data Visualization" icon="document">
+    [Real-Time Dashboards and Data Visualization](./realtime-dashboards-data-visualization). Store MQTT data in InfluxDB via Telegraf, build Grafana dashboards with live charts and gauges, and explore the SiliconWit.io dashboard as a managed alternative. Query historical data and export reports.
+    **Build:** Grafana dashboard with live sensor data. **Parts:** No new hardware.
+  </Card>
+
+  <Card title="Lesson 5: REST APIs, Webhooks, and Device Integration" icon="document">
+    [REST APIs, Webhooks, and Device Integration](./rest-api-webhook-device-integration). Design RESTful APIs for device management and data retrieval. Implement webhook endpoints that receive real-time push notifications, validate payloads with HMAC signatures, and integrate with external services.
+    **Build:** REST API server with webhook receiver. **Parts:** No new hardware.
+  </Card>
+
+  <Card title="Lesson 6: Alerts, Automation, and Rule Engines" icon="document">
+    [Alerts, Automation, and Rule Engines](./alerts-automation-rule-engines). Configure threshold alerts that notify via email, SMS, Discord, Slack, and Telegram. Build automation flows with Node-RED that trigger actions based on sensor data. Compare self-hosted rule engines with the SiliconWit.io alert system.
+    **Build:** Multi-channel alert system with automation flows. **Parts:** No new hardware.
+  </Card>
+
+  <Card title="Lesson 7: Device Security, TLS, and Provisioning" icon="document">
+    [Device Security, TLS, and Provisioning](./device-security-tls-provisioning). Generate and deploy X.509 certificates for mutual TLS authentication. Implement device identity and provisioning workflows. Secure firmware updates with signed images. Audit your IoT deployment against common attack vectors.
+    **Build:** Mutual TLS connection with certificate provisioning. **Parts:** ESP32 (reuse).
+  </Card>
+
+  <Card title="Lesson 8: Production IoT Monitoring System" icon="rocket">
+    [Production IoT Monitoring System](./production-iot-monitoring-system). Combine everything from this course into a complete production system. Deploy multiple sensor nodes, a broker with TLS, a time-series database, live dashboards, automated alerts, and cloud forwarding. Handle node failures, broker restarts, and network outages gracefully.
+    **Build:** Complete production IoT monitoring system. **Parts:** All reused from prior lessons.
+  </Card>
+</CardGrid>
+
+## Parts Kit
+
+**No new hardware required.** Everything is reused from the embedded courses.
+
+| Part | Quantity | First Used | Notes |
+|------|----------|------------|-------|
+| ESP32 dev board | 1 | Lesson 1 | Reuse from ESP32 course |
+| RPi Pico W | 1 | Lesson 3 | Reuse from RPi Pico course |
+| STM32 + ESP-01 (or STM32 with Wi-Fi) | 1 | Lesson 3 | Reuse from STM32 course |
+| BME280 sensor module | 1 | Lesson 1 | Reuse |
+| Raspberry Pi (any model) or Linux PC | 1 | Lesson 2 | For broker and dashboard hosting |
+| USB webcam (optional) | 1 | Lesson 8 | Reuse from Embedded Linux course |
+
+**Total estimated cost: 0 USD** (if you have components from prior courses)
+
+## Skill Progression
+
+| Skill | Lessons 1-2 | Lessons 3-4 | Lessons 5-6 | Lessons 7-8 |
+|-------|------------|------------|------------|------------|
+| **Protocol** | MQTT vs CoAP vs HTTP, broker setup | Multi-MCU MQTT clients, topic design | REST API, webhooks, HMAC | Mutual TLS, X.509, provisioning |
+| **Infrastructure** | Mosquitto, TLS, ACLs | InfluxDB, Telegraf, Grafana | Node-RED, webhook servers | Production deployment, monitoring |
+| **Data** | JSON payloads, QoS levels | Time-series storage, queries | Automation rules, triggers | End-to-end pipeline, failover |
+| **Cloud** | Self-hosted vs SiliconWit.io | Dashboard comparison | Alert channels, integrations | Full production system |
+
+## Prerequisites
+
+<Badge text="Embedded programming experience required" variant="caution" />
+
+**You should be comfortable with:**
+- C programming and at least one MCU platform (ESP32, STM32, or RPi Pico)
+- Basic networking concepts (IP addresses, ports, TCP/UDP)
+- Linux command line (for broker and dashboard setup)
+- At least one course from the embedded series
+
+**Helpful but not required:**
+- Python (for backend scripts and API servers)
+- Docker (for running Grafana, InfluxDB, Node-RED)
+- The Embedded Linux with RPi course (for the edge gateway context)
+
+## Getting Started
+
+<Steps>
+1. **Ensure you have an ESP32 and a BME280 sensor.** Lesson 1 uses these to compare protocols. If you completed the ESP32 course, you already have both.
+
+2. **Set up a Linux machine for the broker.** This can be your development PC, a Raspberry Pi, a VM, or a cloud VPS. Mosquitto, InfluxDB, and Grafana all run on any Linux distribution.
+
+3. **Create a free SiliconWit.io account.** Go to [siliconwit.io](https://siliconwit.io) and register. SiliconWit.io is a connected operations platform that accepts MQTT connections and provides dashboards, alerts, automation, remote control, and REST API access. The free tier gives you 3 devices with 7-day data retention, enough for all lessons.
+
+4. **Start with Lesson 1.** The protocol comparison gives you the mental model for every decision in the rest of the course.
+
+5. **Work through lessons in order.** Each lesson builds on the infrastructure from previous lessons.
+</Steps>
+
+:::tip[This is not a cloud-only course]
+Every lesson works with a self-hosted setup (your own Mosquitto, Grafana, Node-RED). SiliconWit.io is presented as a convenient managed alternative, not a requirement. You will understand both approaches and can choose what fits your project.
+:::
+
+<Copyright />
+
+<TawkWidget />

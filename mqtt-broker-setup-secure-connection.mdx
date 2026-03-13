@@ -1,0 +1,1213 @@
+---
+title: "MQTT Broker Setup and Secure Connections"
+description: "Install and configure a Mosquitto MQTT broker with TLS encryption, password authentication, and topic ACLs. Connect to both a self-hosted broker and the SiliconWit.io platform. Understand retained messages, last will, QoS levels, and persistence."
+contributors: "sam-macharia,lawrence-langat,john-kibe"
+pubDate: 2026-03-10
+tags: ["mqtt", "mosquitto", "tls", "iot", "broker", "security", "acl", "docker", "siliconwit-io"]
+excerpt: "Set up a production-ready Mosquitto MQTT broker from scratch. Configure TLS encryption with your own certificates, enforce password authentication and topic ACLs, test with command-line tools, bridge to a cloud platform, and deploy with Docker."
+heroImage: "https://cdn.siliconwit.com/education/iot-systems/mqtt-broker-setup-secure-connection.png"
+---
+
+import TawkWidget from '../../../../components/TawkWidget.astro';
+import UniversalContentContributors from '../../../../components/UniversalContentContributors.astro';
+import InArticleAd from '../../../../components/InArticleAd.astro';
+import Copyright from '../../../../components/Copyright.astro';
+import BionicText from '../../../../components/BionicText.astro';
+import TailwindWrapper from '../../../../components/TailwindWrapper.jsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/starlight/components';
+
+<UniversalContentContributors 
+  contributors={frontmatter.contributors}
+/>
+
+
+
+import IoTSystemsComments from '../../../../components/iot-systems/IoTSystemsComments.astro';
+
+Lesson 1 showed that MQTT wins the IoT protocol comparison for most sensor workloads: low overhead, built-in QoS, and a publish/subscribe model that decouples devices from consumers. But you tested against a public broker with no authentication and no encryption. That is fine for a benchmark, not for production. In this lesson you build a real Mosquitto broker from scratch on Linux, lock it down with passwords and topic ACLs, encrypt every connection with TLS, and then bridge it to the SiliconWit.io platform so your data reaches both your local network and the internet. #MQTT #Mosquitto #TLS
+
+## What We Are Building
+
+<Card title="Production-Ready Mosquitto Broker" icon="setting">
+A self-hosted MQTT broker on a Raspberry Pi or Linux machine with password authentication, per-user topic ACLs, TLS on port 8883, WebSocket support on port 8084, and a bridge connection that forwards selected topics to the SiliconWit.io platform. You will test every feature with the `mosquitto_pub` and `mosquitto_sub` command-line tools before connecting any MCU.
+</Card>
+
+**Infrastructure overview:**
+
+| Component | Details |
+|-----------|---------|
+| Broker software | Eclipse Mosquitto 2.x |
+| Host | Raspberry Pi, Ubuntu/Debian VM, or any Linux machine |
+| Plain MQTT port | 1883 (local testing only, disabled in production) |
+| TLS MQTT port | 8883 |
+| WebSocket TLS port | 8084 (WSS) |
+| Authentication | Username/password via `mosquitto_passwd` |
+| Authorization | Per-user topic ACLs with pattern matching |
+| TLS certificates | Self-signed CA, server cert, server key (OpenSSL) |
+| Cloud bridge | Forwarding to `mqtt.siliconwit.io:8883` |
+
+## MQTT Fundamentals
+
+<InArticleAd />
+
+
+Before touching any configuration files, make sure the core MQTT concepts are solid. Everything in this lesson (authentication, ACLs, TLS, bridging) builds on these fundamentals.
+
+### The Publish/Subscribe Model
+
+MQTT uses a broker as the central message router. Devices never communicate directly. A **publisher** sends a message to a **topic** on the broker. A **subscriber** registers interest in one or more topics. The broker delivers each published message to every client whose subscription matches the topic.
+
+This decoupling is what makes MQTT powerful for IoT. The temperature sensor does not know (or care) whether zero, one, or fifty clients are listening. It publishes to `sensors/temperature` and moves on. A dashboard, an alert engine, and a data logger can all subscribe to the same topic independently.
+
+Topics are hierarchical strings separated by forward slashes:
+
+```
+sensors/greenhouse/temperature
+sensors/greenhouse/humidity
+sensors/rooftop/wind_speed
+actuators/greenhouse/ventilation
+```
+
+Subscribers can use two wildcards:
+
+- **`+`** matches exactly one level: `sensors/+/temperature` matches `sensors/greenhouse/temperature` and `sensors/rooftop/temperature` but not `sensors/greenhouse/zone1/temperature`.
+- **`#`** matches all remaining levels: `sensors/#` matches every topic that starts with `sensors/`.
+
+:::caution[Never subscribe to `#` in production]
+Subscribing to `#` receives every message on the entire broker. This is useful for debugging but creates unnecessary load and potential security issues in production.
+:::
+
+### Quality of Service (QoS) Levels
+
+MQTT defines three QoS levels. Each level adds reliability at the cost of additional network overhead.
+
+<CardGrid>
+  <Card title="QoS 0: At Most Once" icon="star">
+    The publisher sends the message once with no acknowledgment. The message might arrive, or it might be lost. This is "fire and forget." Use it for high-frequency sensor data where a single lost reading is acceptable. The overhead is minimal: one PUBLISH packet, no response.
+  </Card>
+
+  <Card title="QoS 1: At Least Once" icon="approve-check">
+    The publisher sends the message and waits for a PUBACK from the broker. If the acknowledgment does not arrive within a timeout, the publisher retransmits. The message is guaranteed to arrive at least once, but duplicates are possible. This is the best default for most IoT data. Two packets: PUBLISH and PUBACK.
+  </Card>
+
+  <Card title="QoS 2: Exactly Once" icon="warning">
+    A four-step handshake ensures the message arrives exactly once: PUBLISH, PUBREC, PUBREL, PUBCOMP. No duplicates, no losses. Use this for critical events like alarms, billing records, or state-change commands where a duplicate would cause problems. The overhead is significant: four packets per message.
+  </Card>
+</CardGrid>
+
+**Choosing the right QoS:**
+
+| Scenario | Recommended QoS | Reasoning |
+|----------|-----------------|-----------|
+| Temperature reading every 10 seconds | QoS 0 | High frequency, next reading replaces the last |
+| Hourly energy meter reading | QoS 1 | Important for billing, duplicates can be filtered |
+| Fire alarm trigger | QoS 2 | Must arrive exactly once, no duplicates |
+| Remote actuator command | QoS 1 or QoS 2 | Depends on whether the actuator is idempotent |
+
+### Retained Messages
+
+When a publisher sets the **retain** flag on a message, the broker stores the last retained message for that topic. Any new subscriber immediately receives this stored message upon subscribing, even if the original publisher sent it days ago.
+
+This is essential for status topics. If a sensor publishes `"online"` to `devices/sensor01/status` with retain=true, any client that subscribes later instantly knows the sensor is online without waiting for the next heartbeat.
+
+To clear a retained message, publish an empty payload (zero bytes) to the same topic with retain=true.
+
+### Last Will and Testament (LWT)
+
+When a client connects to the broker, it can register a "last will" message: a topic, payload, QoS, and retain flag. If the client disconnects unexpectedly (network failure, crash, power loss, or keepalive timeout), the broker automatically publishes the last will message.
+
+This is the standard way to detect offline devices. The pattern is:
+
+<Steps>
+1. On connect, the client registers LWT: topic `devices/sensor01/status`, payload `"offline"`, retain=true.
+
+2. After connecting, the client publishes `"online"` to `devices/sensor01/status` with retain=true.
+
+3. If the client disconnects gracefully, it publishes `"offline"` to the status topic before disconnecting.
+
+4. If the client disconnects unexpectedly, the broker publishes the LWT `"offline"` message automatically.
+</Steps>
+
+Either way, subscribers always see an accurate status.
+
+### Clean Session vs. Persistent Session
+
+When a client connects with **clean session = true** (the default), the broker discards any previous session state. Subscriptions from a prior connection are gone, and queued messages are deleted. Every connection starts fresh.
+
+With **clean session = false**, the broker remembers the client's subscriptions and queues any QoS 1/QoS 2 messages that arrive while the client is offline. When the client reconnects with the same client ID, it receives all queued messages. This requires:
+
+- A stable, unique **client ID** so the broker can identify the returning client.
+- QoS 1 or QoS 2 on the subscription. QoS 0 messages are never queued.
+
+Persistent sessions are valuable for battery-powered devices that sleep for minutes or hours between connections. The broker buffers important messages and delivers them in bulk when the device wakes up.
+
+:::note[MQTT 5.0 replaces "clean session" with "clean start" and "session expiry interval"]
+MQTT 5.0 separates the concepts: `clean_start` controls whether to resume a session, and `session_expiry_interval` controls how long the broker keeps the session after disconnect. Mosquitto 2.x supports both MQTT 3.1.1 and 5.0.
+:::
+
+## Installing Mosquitto on Linux
+
+<InArticleAd />
+
+
+Mosquitto is the most widely used open-source MQTT broker. It is lightweight, fast, and runs comfortably on a Raspberry Pi alongside other services.
+
+<Tabs>
+<TabItem label="Ubuntu/Debian">
+
+<Steps>
+1. Update the package list and install Mosquitto along with the client tools:
+
+   ```bash title="Install Mosquitto broker and clients"
+   sudo apt update
+   sudo apt install -y mosquitto mosquitto-clients
+   ```
+
+2. Mosquitto starts automatically as a systemd service. Verify it is running:
+
+   ```bash title="Check Mosquitto service status"
+   sudo systemctl status mosquitto
+   ```
+
+   You should see `Active: active (running)`.
+
+3. Check the installed version:
+
+   ```bash title="Verify Mosquitto version"
+   mosquitto -v 2>&1 | head -1
+   ```
+
+   You need version 2.0 or later. Older versions (1.x) have a different default configuration that allows anonymous access.
+
+4. The main configuration file is at `/etc/mosquitto/mosquitto.conf`. Additional config files are loaded from `/etc/mosquitto/conf.d/`. The default data directory is `/var/lib/mosquitto/`.
+</Steps>
+
+</TabItem>
+<TabItem label="Raspberry Pi OS">
+
+<Steps>
+1. Raspberry Pi OS is Debian-based, so the installation is the same:
+
+   ```bash title="Install Mosquitto on Raspberry Pi"
+   sudo apt update
+   sudo apt install -y mosquitto mosquitto-clients
+   ```
+
+2. Enable the service to start on boot (usually enabled by default):
+
+   ```bash title="Enable Mosquitto on boot"
+   sudo systemctl enable mosquitto
+   sudo systemctl start mosquitto
+   ```
+
+3. If you are running a minimal (Lite) image without a desktop, Mosquitto uses very little memory (under 10 MB for thousands of clients) and is an excellent choice for an always-on edge broker.
+</Steps>
+
+</TabItem>
+<TabItem label="Fedora/RHEL">
+
+<Steps>
+1. Install from the default repositories:
+
+   ```bash title="Install Mosquitto on Fedora"
+   sudo dnf install -y mosquitto
+   ```
+
+2. Start and enable the service:
+
+   ```bash title="Start Mosquitto service"
+   sudo systemctl enable --now mosquitto
+   ```
+</Steps>
+
+</TabItem>
+</Tabs>
+
+### Configuration File Layout
+
+<FileTree>
+- /etc/mosquitto/
+  - mosquitto.conf
+  - conf.d/
+    - default.conf
+  - ca_certificates/
+  - certs/
+- /var/lib/mosquitto/
+  - mosquitto.db
+- /var/log/mosquitto/
+  - mosquitto.log
+</FileTree>
+
+The default `mosquitto.conf` on Mosquitto 2.x is minimal. It typically contains just a `pid_file` directive and an include for `conf.d/`. You will create your own config file in `conf.d/`.
+
+## Basic Mosquitto Configuration
+
+<InArticleAd />
+
+
+Start with a baseline configuration that defines a listener, disables anonymous access, and enables persistence.
+
+```conf title="/etc/mosquitto/conf.d/default.conf"
+# ── Listener ──
+listener 1883
+protocol mqtt
+
+# ── Authentication ──
+allow_anonymous false
+password_file /etc/mosquitto/passwd
+
+# ── Persistence ──
+persistence true
+persistence_location /var/lib/mosquitto/
+autosave_interval 300
+
+# ── Limits ──
+max_connections 100
+max_inflight_messages 20
+max_queued_messages 1000
+message_size_limit 262144
+
+# ── Logging ──
+log_dest file /var/log/mosquitto/mosquitto.log
+log_type error
+log_type warning
+log_type notice
+log_type information
+connection_messages true
+log_timestamp true
+log_timestamp_format %Y-%m-%dT%H:%M:%S
+```
+
+**Key directives explained:**
+
+| Directive | Purpose |
+|-----------|---------|
+| `listener 1883` | Open a listener on TCP port 1883 |
+| `allow_anonymous false` | Require username/password for all connections |
+| `password_file` | Path to the password file created by `mosquitto_passwd` |
+| `persistence true` | Store retained messages and subscriptions to disk |
+| `autosave_interval 300` | Write the persistence database every 300 seconds |
+| `max_connections 100` | Limit total simultaneous connections |
+| `max_queued_messages 1000` | Maximum queued messages per client (persistent sessions) |
+| `message_size_limit 262144` | Maximum message payload size in bytes (256 KB) |
+
+After saving the config, restart Mosquitto:
+
+```bash title="Restart Mosquitto with new config"
+sudo systemctl restart mosquitto
+sudo systemctl status mosquitto
+```
+
+If the service fails to start, check the log:
+
+```bash title="View Mosquitto log for errors"
+sudo tail -50 /var/log/mosquitto/mosquitto.log
+```
+
+## Password Authentication
+
+<InArticleAd />
+
+
+Mosquitto uses the `mosquitto_passwd` utility to manage a password file. Passwords are stored as salted SHA512 hashes.
+
+<Steps>
+1. Create the password file and add the first user:
+
+   ```bash title="Create password file with first user"
+   sudo mosquitto_passwd -c /etc/mosquitto/passwd sensor_node_01
+   ```
+
+   You will be prompted to enter and confirm a password. The `-c` flag creates a new file (overwriting any existing one).
+
+2. Add additional users without the `-c` flag (which would overwrite the file):
+
+   ```bash title="Add more users"
+   sudo mosquitto_passwd /etc/mosquitto/passwd dashboard_user
+   sudo mosquitto_passwd /etc/mosquitto/passwd admin_user
+   ```
+
+3. To add a user non-interactively (useful for scripts), use the `-b` flag:
+
+   ```bash title="Add user non-interactively"
+   sudo mosquitto_passwd -b /etc/mosquitto/passwd actuator_node_01 MySecurePassword123
+   ```
+
+4. To delete a user:
+
+   ```bash title="Delete a user"
+   sudo mosquitto_passwd -D /etc/mosquitto/passwd old_user
+   ```
+
+5. Verify the password file exists and has the correct ownership:
+
+   ```bash title="Check password file permissions"
+   ls -la /etc/mosquitto/passwd
+   sudo chown mosquitto:mosquitto /etc/mosquitto/passwd
+   sudo chmod 600 /etc/mosquitto/passwd
+   ```
+
+6. Restart Mosquitto to pick up the new password file:
+
+   ```bash title="Restart after password changes"
+   sudo systemctl restart mosquitto
+   ```
+</Steps>
+
+### Testing Authentication
+
+Test that anonymous access is denied and authenticated access works:
+
+```bash title="Test: anonymous access should fail"
+mosquitto_pub -h localhost -t test/hello -m "anonymous message"
+# Expected: Connection error, not authorized
+```
+
+```bash title="Test: authenticated access should succeed"
+mosquitto_pub -h localhost -t test/hello -m "authenticated message" \
+  -u sensor_node_01 -P "YourPasswordHere"
+```
+
+In a second terminal, subscribe to verify the message arrives:
+
+```bash title="Subscribe with authentication"
+mosquitto_sub -h localhost -t test/hello \
+  -u dashboard_user -P "YourPasswordHere"
+```
+
+## Topic ACLs
+
+<InArticleAd />
+
+
+Passwords control who can connect. ACLs (Access Control Lists) control what each user can publish and subscribe to. Without ACLs, any authenticated user can read and write any topic.
+
+### Creating an ACL File
+
+Create an ACL file that defines per-user permissions:
+
+```conf title="/etc/mosquitto/acl"
+# ── Admin user: full access to everything ──
+user admin_user
+topic readwrite #
+
+# ── Sensor node 01: publish to its own topics, subscribe to commands ──
+user sensor_node_01
+topic write sensors/node01/temperature
+topic write sensors/node01/humidity
+topic write sensors/node01/status
+topic read commands/node01/#
+
+# ── Dashboard user: read all sensor data, no publishing ──
+user dashboard_user
+topic read sensors/#
+topic read devices/+/status
+
+# ── Actuator node 01: subscribe to commands, publish status ──
+user actuator_node_01
+topic read commands/actuator01/#
+topic write actuators/actuator01/status
+topic write actuators/actuator01/feedback
+```
+
+### Pattern Matching with %u and %c
+
+Mosquitto supports two substitution patterns in ACL rules:
+
+- **`%u`** is replaced with the connecting client's username.
+- **`%c`** is replaced with the connecting client's client ID.
+
+This lets you write generic rules that apply to many users:
+
+```conf title="Pattern-based ACL rules"
+# Every user can publish to their own sensor topic
+pattern write sensors/%u/+
+
+# Every user can read commands addressed to them
+pattern read commands/%u/#
+
+# Every user can publish their own status
+pattern write devices/%u/status
+
+# Every client can publish to a topic named after its client ID
+pattern write clients/%c/data
+```
+
+With pattern rules, you do not need to add a new ACL block every time you provision a new device. As long as the username matches the expected pattern, permissions are automatic.
+
+### Enabling ACLs
+
+Add the ACL file directive to your Mosquitto configuration:
+
+```conf title="Add to /etc/mosquitto/conf.d/default.conf"
+acl_file /etc/mosquitto/acl
+```
+
+Set the correct ownership and restart:
+
+```bash title="Apply ACL file"
+sudo chown mosquitto:mosquitto /etc/mosquitto/acl
+sudo chmod 600 /etc/mosquitto/acl
+sudo systemctl restart mosquitto
+```
+
+### Testing ACLs
+
+Verify that sensor_node_01 can publish to its allowed topic:
+
+```bash title="Test: allowed publish should succeed"
+mosquitto_pub -h localhost -t sensors/node01/temperature -m '{"temp_c": 23.5}' \
+  -u sensor_node_01 -P "YourPasswordHere"
+```
+
+Verify that sensor_node_01 cannot publish to another node's topic:
+
+```bash title="Test: unauthorized publish should be rejected"
+mosquitto_pub -h localhost -t sensors/node02/temperature -m '{"temp_c": 23.5}' \
+  -u sensor_node_01 -P "YourPasswordHere"
+# Expected: publish denied (check mosquitto.log for "denied" message)
+```
+
+Verify that dashboard_user can subscribe to sensor data but not publish:
+
+```bash title="Test: dashboard read-only access"
+# This should work (reading sensors):
+mosquitto_sub -h localhost -t "sensors/#" \
+  -u dashboard_user -P "YourPasswordHere"
+
+# This should fail (writing to sensors):
+mosquitto_pub -h localhost -t sensors/node01/temperature -m '{"temp_c": 99}' \
+  -u dashboard_user -P "YourPasswordHere"
+```
+
+## TLS Setup with OpenSSL
+
+<InArticleAd />
+
+
+Plain MQTT on port 1883 sends everything in clear text: usernames, passwords, and message payloads. TLS encrypts the entire connection. For a self-hosted broker, you need three files: a CA certificate, a server certificate, and a server private key.
+
+### Generating Certificates
+
+<Steps>
+1. Create a directory for the certificates:
+
+   ```bash title="Create certificate directory"
+   sudo mkdir -p /etc/mosquitto/certs
+   cd /etc/mosquitto/certs
+   ```
+
+2. Generate the Certificate Authority (CA) private key:
+
+   ```bash title="Generate CA key"
+   sudo openssl genrsa -out ca.key 2048
+   ```
+
+3. Create the CA certificate (valid for 10 years):
+
+   ```bash title="Create CA certificate"
+   sudo openssl req -new -x509 -days 3650 -key ca.key -out ca.crt \
+     -subj "/C=US/ST=State/L=City/O=MyIoTLab/CN=MQTT CA"
+   ```
+
+4. Generate the server private key:
+
+   ```bash title="Generate server key"
+   sudo openssl genrsa -out server.key 2048
+   ```
+
+5. Create a Certificate Signing Request (CSR) for the server. Replace `your-broker-hostname` with the actual hostname or IP of your broker:
+
+   ```bash title="Create server CSR"
+   sudo openssl req -new -key server.key -out server.csr \
+     -subj "/C=US/ST=State/L=City/O=MyIoTLab/CN=your-broker-hostname"
+   ```
+
+   :::tip[CN must match the broker hostname]
+   The Common Name (CN) in the server certificate must match the hostname that clients use to connect. If clients connect via IP address, use that IP as the CN. If they connect via a DNS name like `mqtt.local`, use that as the CN.
+   :::
+
+6. Sign the server certificate with the CA (valid for 1 year):
+
+   ```bash title="Sign server certificate"
+   sudo openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key \
+     -CAcreateserial -out server.crt -days 365
+   ```
+
+7. Set proper permissions so Mosquitto can read the files:
+
+   ```bash title="Set certificate permissions"
+   sudo chown mosquitto:mosquitto /etc/mosquitto/certs/*
+   sudo chmod 600 /etc/mosquitto/certs/ca.key /etc/mosquitto/certs/server.key
+   sudo chmod 644 /etc/mosquitto/certs/ca.crt /etc/mosquitto/certs/server.crt
+   ```
+
+8. Verify the certificate chain:
+
+   ```bash title="Verify certificate chain"
+   openssl verify -CAfile /etc/mosquitto/certs/ca.crt /etc/mosquitto/certs/server.crt
+   ```
+
+   You should see `server.crt: OK`.
+</Steps>
+
+The resulting files:
+
+| File | Purpose | Keep Secret? |
+|------|---------|--------------|
+| `ca.key` | CA private key, signs other certificates | Yes, highly sensitive |
+| `ca.crt` | CA public certificate, distributed to clients | No, share freely |
+| `server.key` | Server private key | Yes, broker only |
+| `server.crt` | Server public certificate, presented to clients during TLS handshake | No |
+| `server.csr` | Certificate signing request (no longer needed) | Can delete |
+
+### Configuring Mosquitto for TLS
+
+Update your configuration to add a TLS listener on port 8883:
+
+```conf title="/etc/mosquitto/conf.d/default.conf (updated with TLS)"
+# ── Plain MQTT listener (disable in production) ──
+# listener 1883
+# protocol mqtt
+
+# ── TLS MQTT listener ──
+listener 8883
+protocol mqtt
+cafile /etc/mosquitto/certs/ca.crt
+certfile /etc/mosquitto/certs/server.crt
+keyfile /etc/mosquitto/certs/server.key
+tls_version tlsv1.2
+
+# ── Authentication ──
+allow_anonymous false
+password_file /etc/mosquitto/passwd
+
+# ── ACLs ──
+acl_file /etc/mosquitto/acl
+
+# ── Persistence ──
+persistence true
+persistence_location /var/lib/mosquitto/
+autosave_interval 300
+
+# ── Limits ──
+max_connections 100
+max_inflight_messages 20
+max_queued_messages 1000
+message_size_limit 262144
+
+# ── Logging ──
+log_dest file /var/log/mosquitto/mosquitto.log
+log_type error
+log_type warning
+log_type notice
+log_type information
+connection_messages true
+log_timestamp true
+log_timestamp_format %Y-%m-%dT%H:%M:%S
+```
+
+Notice that the plain listener on port 1883 is commented out. In production, you should only expose the TLS listener. During development, you can keep both active if needed.
+
+Restart and verify:
+
+```bash title="Restart Mosquitto with TLS"
+sudo systemctl restart mosquitto
+sudo systemctl status mosquitto
+```
+
+Check the log to confirm TLS is active:
+
+```bash title="Verify TLS listener started"
+sudo grep -i "opening" /var/log/mosquitto/mosquitto.log | tail -5
+```
+
+You should see a line indicating the listener opened on port 8883.
+
+### Testing TLS Connections
+
+Copy the `ca.crt` file to the machine where you will run the test clients. Then test:
+
+```bash title="Publish over TLS"
+mosquitto_pub -h your-broker-hostname -p 8883 \
+  --cafile /path/to/ca.crt \
+  -u sensor_node_01 -P "YourPasswordHere" \
+  -t sensors/node01/temperature -m '{"temp_c": 24.1}'
+```
+
+```bash title="Subscribe over TLS"
+mosquitto_sub -h your-broker-hostname -p 8883 \
+  --cafile /path/to/ca.crt \
+  -u dashboard_user -P "YourPasswordHere" \
+  -t "sensors/#"
+```
+
+If connecting by IP address and your certificate CN is a hostname, you may need to add `--insecure` to skip hostname verification during testing. Do not use `--insecure` in production.
+
+```bash title="Connect by IP (testing only)"
+mosquitto_pub -h 192.168.1.50 -p 8883 \
+  --cafile /path/to/ca.crt --insecure \
+  -u sensor_node_01 -P "YourPasswordHere" \
+  -t sensors/node01/temperature -m '{"temp_c": 24.1}'
+```
+
+## Connecting to the SiliconWit.io Platform
+
+<InArticleAd />
+
+
+[SiliconWit.io](https://siliconwit.io) is a connected operations platform that provides real-time monitoring, dashboards, alerts (email, SMS, Discord, Slack, Telegram), remote device control, automation rules, AI analytics, and a REST API. Its MQTT endpoint lets devices publish telemetry and receive commands. When you register a device on the platform, you receive credentials and a topic structure that keeps each device isolated.
+
+### Connection Details
+
+| Parameter | Value |
+|-----------|-------|
+| Host | `mqtt.siliconwit.io` |
+| Port | 8883 (MQTT over TLS) |
+| WebSocket port | 8084 (WSS) |
+| Username | Your device ID (from [siliconwit.io](https://siliconwit.io), Dashboard -> Devices) |
+| Password | Your access token (from [siliconwit.io](https://siliconwit.io), Dashboard -> Devices) |
+| Publish topic | `d/{device_id}/t` (telemetry data) |
+| Subscribe topic | `d/{device_id}/c` (commands from the cloud) |
+| TLS | Required, uses a publicly trusted CA certificate |
+
+### Testing with Command-Line Tools
+
+```bash title="Publish telemetry to SiliconWit.io"
+mosquitto_pub -h mqtt.siliconwit.io -p 8883 \
+  --capath /etc/ssl/certs/ \
+  -u "YOUR_DEVICE_ID" -P "YOUR_ACCESS_TOKEN" \
+  -t "d/YOUR_DEVICE_ID/t" \
+  -m '{"temperature": 23.5, "humidity": 61.2}'
+```
+
+```bash title="Subscribe to commands from SiliconWit.io"
+mosquitto_sub -h mqtt.siliconwit.io -p 8883 \
+  --capath /etc/ssl/certs/ \
+  -u "YOUR_DEVICE_ID" -P "YOUR_ACCESS_TOKEN" \
+  -t "d/YOUR_DEVICE_ID/c"
+```
+
+Because `mqtt.siliconwit.io` uses a certificate signed by a public CA (not self-signed), you can use `--capath /etc/ssl/certs/` to point to the system's trusted CA bundle instead of a specific CA file.
+
+### Topic Structure
+
+The SiliconWit.io topic structure follows a simple convention:
+
+```
+d/{device_id}/t     Telemetry: device publishes sensor data here
+d/{device_id}/c     Commands: device subscribes here for remote commands
+d/{device_id}/s     Status: device publishes online/offline status
+```
+
+The ACL on the SiliconWit.io platform ensures that each device can only access its own topics. Device A cannot read or write to Device B's topics.
+
+## WebSocket Support
+
+<InArticleAd />
+
+
+WebSockets allow browser-based JavaScript clients to connect to MQTT. This is how web dashboards receive live sensor data without polling a REST API. Mosquitto supports WebSocket listeners alongside standard TCP listeners.
+
+### Configuring WebSocket TLS (WSS)
+
+Add a WebSocket listener to your configuration:
+
+```conf title="Add to /etc/mosquitto/conf.d/default.conf"
+# ── WebSocket TLS listener ──
+listener 8084
+protocol websockets
+cafile /etc/mosquitto/certs/ca.crt
+certfile /etc/mosquitto/certs/server.crt
+keyfile /etc/mosquitto/certs/server.key
+tls_version tlsv1.2
+```
+
+This shares the same certificate files as the MQTT TLS listener. The `protocol websockets` directive tells Mosquitto to expect WebSocket connections on this port.
+
+Restart Mosquitto after adding the WebSocket listener:
+
+```bash title="Restart for WebSocket support"
+sudo systemctl restart mosquitto
+```
+
+### Testing with a Browser Client
+
+You can test WebSocket connectivity using any MQTT.js-based client. A quick test with the `mqtt` npm package:
+
+```javascript title="websocket-test.js"
+const mqtt = require("mqtt");
+
+const client = mqtt.connect("wss://your-broker-hostname:8084", {
+  ca: require("fs").readFileSync("/path/to/ca.crt"),
+  username: "dashboard_user",
+  password: "YourPasswordHere",
+  rejectUnauthorized: true,
+});
+
+client.on("connect", () => {
+  console.log("Connected via WebSocket TLS");
+  client.subscribe("sensors/#");
+});
+
+client.on("message", (topic, message) => {
+  console.log(`${topic}: ${message.toString()}`);
+});
+```
+
+For SiliconWit.io, the WebSocket endpoint is `wss://mqtt.siliconwit.io:8084`. The same device credentials (device ID as username, access token as password) work for both MQTT and WebSocket connections.
+
+## Mosquitto Bridge Configuration
+
+<InArticleAd />
+
+
+A bridge connects two MQTT brokers so that messages published on one automatically appear on the other. This is the standard pattern for edge computing: your local Mosquitto broker collects data from sensors on the LAN, and a bridge forwards selected topics to the cloud for storage and visualization.
+
+### Bridge to SiliconWit.io
+
+Add a bridge configuration to your Mosquitto config:
+
+```conf title="/etc/mosquitto/conf.d/bridge.conf"
+# ── Bridge to SiliconWit.io ──
+connection siliconwit_bridge
+address mqtt.siliconwit.io:8883
+
+# Authentication
+remote_username YOUR_DEVICE_ID
+remote_password YOUR_ACCESS_TOKEN
+
+# TLS for the bridge connection
+bridge_capath /etc/ssl/certs/
+bridge_protocol_version mqttv311
+
+# Topic mapping:
+# Forward local "sensors/#" to cloud "d/DEVICE_ID/t" (outgoing only)
+topic sensors/# out 1 "" d/YOUR_DEVICE_ID/t/
+
+# Forward cloud commands to local (incoming only)
+topic # in 1 d/YOUR_DEVICE_ID/c/ commands/cloud/
+
+# Bridge options
+cleansession false
+start_type automatic
+restart_timeout 10
+try_private false
+notifications true
+notification_topic bridge/siliconwit/status
+```
+
+**Topic mapping syntax:** `topic <pattern> <direction> <QoS> <local_prefix> <remote_prefix>`
+
+- **`out`**: Forward messages from local broker to remote broker.
+- **`in`**: Forward messages from remote broker to local broker.
+- **`both`**: Bidirectional forwarding.
+
+In this configuration:
+- Local messages matching `sensors/#` are forwarded to the cloud under `d/DEVICE_ID/t/sensors/#`.
+- Cloud messages under `d/DEVICE_ID/c/#` appear locally under `commands/cloud/#`.
+
+The `cleansession false` setting ensures that if the bridge disconnects temporarily (internet outage), the cloud platform queues messages, and the bridge receives them when it reconnects.
+
+### Verifying the Bridge
+
+After restarting Mosquitto, check that the bridge connected:
+
+```bash title="Check bridge status"
+mosquitto_sub -h localhost -p 8883 \
+  --cafile /etc/mosquitto/certs/ca.crt \
+  -u admin_user -P "YourPasswordHere" \
+  -t "bridge/siliconwit/status"
+```
+
+You should see a `1` (connected) message. If the bridge fails to connect, check the Mosquitto log for TLS or authentication errors.
+
+Publish a test message locally and verify it arrives on the cloud:
+
+```bash title="Test bridge forwarding"
+mosquitto_pub -h localhost -p 8883 \
+  --cafile /etc/mosquitto/certs/ca.crt \
+  -u sensor_node_01 -P "YourPasswordHere" \
+  -t sensors/node01/temperature -m '{"temp_c": 25.0}'
+```
+
+Check the SiliconWit.io dashboard to confirm the telemetry data arrived.
+
+## Monitoring with $SYS Topics
+
+<InArticleAd />
+
+
+Mosquitto publishes internal statistics on special `$SYS/` topics. These are read-only system topics that you can subscribe to for real-time monitoring.
+
+### Key $SYS Topics
+
+| Topic | Description |
+|-------|-------------|
+| `$SYS/broker/version` | Mosquitto version string |
+| `$SYS/broker/uptime` | Broker uptime in seconds |
+| `$SYS/broker/clients/connected` | Number of currently connected clients |
+| `$SYS/broker/clients/total` | Total clients (connected + disconnected with sessions) |
+| `$SYS/broker/messages/received` | Total messages received since startup |
+| `$SYS/broker/messages/sent` | Total messages sent since startup |
+| `$SYS/broker/messages/stored` | Number of retained messages currently stored |
+| `$SYS/broker/bytes/received` | Total bytes received |
+| `$SYS/broker/bytes/sent` | Total bytes sent |
+| `$SYS/broker/load/messages/received/1min` | Messages received per minute (1-minute average) |
+| `$SYS/broker/load/messages/sent/1min` | Messages sent per minute (1-minute average) |
+| `$SYS/broker/subscriptions/count` | Total active subscriptions |
+
+### Subscribing to $SYS
+
+```bash title="Monitor all $SYS topics"
+mosquitto_sub -h localhost -p 8883 \
+  --cafile /etc/mosquitto/certs/ca.crt \
+  -u admin_user -P "YourPasswordHere" \
+  -t '$SYS/#' -v
+```
+
+The `-v` flag prints the topic alongside the payload, which is essential when subscribing to a wildcard.
+
+:::note[Quote the $SYS topic in your shell]
+Use single quotes around `$SYS/#` to prevent the shell from interpreting `$SYS` as an environment variable.
+:::
+
+To monitor just the connected client count in a script:
+
+```bash title="Watch connected clients"
+mosquitto_sub -h localhost -p 8883 \
+  --cafile /etc/mosquitto/certs/ca.crt \
+  -u admin_user -P "YourPasswordHere" \
+  -t '$SYS/broker/clients/connected' -C 1
+```
+
+The `-C 1` flag exits after receiving one message, which is useful for scripting.
+
+## Logging and Debugging
+
+<InArticleAd />
+
+
+Good logging configuration helps you diagnose connection issues, ACL denials, and message flow problems.
+
+### Log Type Settings
+
+Mosquitto supports several log types that you can enable independently:
+
+```conf title="Logging options in mosquitto.conf"
+log_dest file /var/log/mosquitto/mosquitto.log
+log_dest stdout
+
+# Log types (enable the ones you need):
+log_type error          # Always enable
+log_type warning        # Always enable
+log_type notice         # Connection/disconnection events
+log_type information    # Subscription and unsubscription events
+log_type debug          # Detailed protocol-level messages (verbose)
+log_type subscribe      # Log all subscribe/unsubscribe actions
+log_type unsubscribe
+```
+
+For production, use `error`, `warning`, `notice`, and `information`. Enable `debug` only when actively troubleshooting, as it generates a large volume of output.
+
+### Common Debugging Scenarios
+
+**Client cannot connect:**
+
+```bash title="Watch for connection errors in real time"
+sudo tail -f /var/log/mosquitto/mosquitto.log | grep -i "connect\|error\|denied"
+```
+
+Look for messages like:
+- `Connection refused: not authorised` (bad username/password)
+- `OpenSSL Error` (certificate problem)
+- `Socket error` (network/firewall issue)
+
+**Client connects but cannot publish or subscribe:**
+
+ACL denials are logged when `log_type information` or `log_type debug` is enabled. Look for:
+- `Denied PUBLISH ... (ACL)` (user lacks write permission on that topic)
+- `Denied SUBSCRIBE ... (ACL)` (user lacks read permission on that topic)
+
+**Messages are not arriving at subscribers:**
+
+Check that the publisher and subscriber are using the same topic string (topic matching is case-sensitive). Use `mosquitto_sub -v -t '#'` with an admin account to see all messages flowing through the broker.
+
+### Log Rotation
+
+For long-running brokers, configure logrotate to prevent the log file from growing indefinitely:
+
+```conf title="/etc/logrotate.d/mosquitto"
+/var/log/mosquitto/mosquitto.log {
+    weekly
+    rotate 4
+    compress
+    missingok
+    notifempty
+    postrotate
+        /bin/kill -HUP $(cat /run/mosquitto/mosquitto.pid 2>/dev/null) 2>/dev/null || true
+    endscript
+}
+```
+
+This rotates the log weekly, keeps 4 compressed copies, and sends a HUP signal to Mosquitto so it reopens the log file.
+
+## Docker Deployment
+
+<InArticleAd />
+
+
+Running Mosquitto in Docker simplifies deployment, makes configuration portable, and allows you to run multiple broker instances on the same machine.
+
+:::tip[Podman as a Docker alternative]
+[Podman](https://podman.io) is a fully open source (Apache 2.0) container engine with no paid tiers. It runs rootless by default and requires no background daemon, which is preferable on IoT gateway devices. Docker Desktop requires a paid subscription for larger organizations, though Docker Engine on Linux remains free. Most `docker compose` commands in this lesson work with `podman-compose`, though some features like `depends_on` health checks and inter-container networking may need minor adjustments. Test your Compose file with `podman-compose up` before deploying.
+:::
+
+### Directory Structure
+
+Create a directory structure for the Docker deployment:
+
+```bash title="Create Mosquitto Docker directory"
+mkdir -p ~/mosquitto-docker/{config,data,log,certs}
+```
+
+<FileTree>
+- ~/mosquitto-docker/
+  - config/
+    - mosquitto.conf
+    - passwd
+    - acl
+  - certs/
+    - ca.crt
+    - server.crt
+    - server.key
+  - data/
+  - log/
+  - docker-compose.yml
+</FileTree>
+
+### Configuration for Docker
+
+The configuration is almost identical to the bare-metal setup, but the paths reference the container's filesystem:
+
+```conf title="~/mosquitto-docker/config/mosquitto.conf"
+# ── TLS MQTT listener ──
+listener 8883
+protocol mqtt
+cafile /mosquitto/certs/ca.crt
+certfile /mosquitto/certs/server.crt
+keyfile /mosquitto/certs/server.key
+tls_version tlsv1.2
+
+# ── WebSocket TLS listener ──
+listener 8084
+protocol websockets
+cafile /mosquitto/certs/ca.crt
+certfile /mosquitto/certs/server.crt
+keyfile /mosquitto/certs/server.key
+tls_version tlsv1.2
+
+# ── Authentication and ACLs ──
+allow_anonymous false
+password_file /mosquitto/config/passwd
+acl_file /mosquitto/config/acl
+
+# ── Persistence ──
+persistence true
+persistence_location /mosquitto/data/
+autosave_interval 300
+
+# ── Logging ──
+log_dest file /mosquitto/log/mosquitto.log
+log_dest stdout
+log_type error
+log_type warning
+log_type notice
+log_type information
+connection_messages true
+log_timestamp true
+log_timestamp_format %Y-%m-%dT%H:%M:%S
+```
+
+### Docker Compose File
+
+```yaml title="~/mosquitto-docker/docker-compose.yml"
+version: "3.8"
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: mosquitto
+    restart: unless-stopped
+    ports:
+      - "8883:8883"
+      - "8084:8084"
+    volumes:
+      - ./config:/mosquitto/config:ro
+      - ./certs:/mosquitto/certs:ro
+      - ./data:/mosquitto/data
+      - ./log:/mosquitto/log
+    user: "1883:1883"
+```
+
+### Deploying with Docker
+
+<Steps>
+1. Copy your certificates into the `certs/` directory:
+
+   ```bash title="Copy certificates"
+   cp /etc/mosquitto/certs/ca.crt ~/mosquitto-docker/certs/
+   cp /etc/mosquitto/certs/server.crt ~/mosquitto-docker/certs/
+   cp /etc/mosquitto/certs/server.key ~/mosquitto-docker/certs/
+   ```
+
+2. Generate the password file inside the Docker container (the format must match the container's Mosquitto version):
+
+   ```bash title="Create password file with Docker"
+   docker run --rm -v ~/mosquitto-docker/config:/mosquitto/config \
+     eclipse-mosquitto:2 \
+     mosquitto_passwd -c /mosquitto/config/passwd sensor_node_01
+   ```
+
+   Add additional users the same way (without `-c`):
+
+   ```bash title="Add more users"
+   docker run --rm -v ~/mosquitto-docker/config:/mosquitto/config \
+     eclipse-mosquitto:2 \
+     mosquitto_passwd /mosquitto/config/passwd dashboard_user
+   ```
+
+3. Copy your ACL file:
+
+   ```bash title="Copy ACL file"
+   cp /etc/mosquitto/acl ~/mosquitto-docker/config/acl
+   ```
+
+4. Set ownership for the data and log directories (UID 1883 is the mosquitto user inside the container):
+
+   ```bash title="Set directory ownership"
+   sudo chown -R 1883:1883 ~/mosquitto-docker/data ~/mosquitto-docker/log
+   ```
+
+5. Start the container:
+
+   ```bash title="Start Mosquitto in Docker"
+   cd ~/mosquitto-docker
+   docker compose up -d
+   ```
+
+6. Verify it is running:
+
+   ```bash title="Check container status"
+   docker compose logs -f mosquitto
+   ```
+
+   Press Ctrl+C to exit the log viewer. You should see Mosquitto start up with listeners on ports 8883 and 8084.
+</Steps>
+
+### Updating Configuration
+
+When you change the config, password file, or ACL file, restart the container:
+
+```bash title="Restart after config change"
+cd ~/mosquitto-docker
+docker compose restart
+```
+
+To stop and remove the container:
+
+```bash title="Stop Mosquitto container"
+cd ~/mosquitto-docker
+docker compose down
+```
+
+The `data/` and `log/` directories persist on the host, so retained messages and logs survive container restarts.
+
+## Complete Configuration Reference
+
+<InArticleAd />
+
+
+Here is the full production configuration bringing together everything from this lesson:
+
+```conf title="/etc/mosquitto/conf.d/default.conf (complete)"
+# ============================================================
+# Mosquitto production configuration
+# ============================================================
+
+# ── TLS MQTT listener (port 8883) ──
+listener 8883
+protocol mqtt
+cafile /etc/mosquitto/certs/ca.crt
+certfile /etc/mosquitto/certs/server.crt
+keyfile /etc/mosquitto/certs/server.key
+tls_version tlsv1.2
+
+# ── WebSocket TLS listener (port 8084) ──
+listener 8084
+protocol websockets
+cafile /etc/mosquitto/certs/ca.crt
+certfile /etc/mosquitto/certs/server.crt
+keyfile /etc/mosquitto/certs/server.key
+tls_version tlsv1.2
+
+# ── Authentication ──
+allow_anonymous false
+password_file /etc/mosquitto/passwd
+
+# ── Topic ACLs ──
+acl_file /etc/mosquitto/acl
+
+# ── Persistence ──
+persistence true
+persistence_location /var/lib/mosquitto/
+autosave_interval 300
+
+# ── Connection limits ──
+max_connections 100
+max_inflight_messages 20
+max_queued_messages 1000
+message_size_limit 262144
+
+# ── Keepalive ──
+max_keepalive 120
+
+# ── Logging ──
+log_dest file /var/log/mosquitto/mosquitto.log
+log_type error
+log_type warning
+log_type notice
+log_type information
+connection_messages true
+log_timestamp true
+log_timestamp_format %Y-%m-%dT%H:%M:%S
+```
+
+## Exercises
+
+<InArticleAd />
+
+
+1. **Set up a multi-user broker with ACLs.** Create a Mosquitto broker with four users: `sensor_a`, `sensor_b`, `dashboard`, and `admin`. Configure ACLs so that `sensor_a` can only publish to `sensors/a/#` and subscribe to `commands/a/#`, `sensor_b` can only publish to `sensors/b/#` and subscribe to `commands/b/#`, `dashboard` can read all sensor topics but cannot publish, and `admin` has full read/write access to all topics. Test every permission boundary: verify that `sensor_a` cannot publish to `sensors/b/temperature`, that `dashboard` cannot publish at all, and that `admin` can do everything. Use pattern-based ACL rules with `%u` so a single rule covers both sensors.
+
+2. **Generate certificates and enable TLS.** Follow the OpenSSL steps in this lesson to generate your own CA certificate, server certificate, and server key. Configure Mosquitto to listen on port 8883 with TLS. Test the connection using `mosquitto_pub` and `mosquitto_sub` with the `--cafile` flag. Then intentionally break something (use the wrong CA file, use an expired certificate, use a mismatched hostname) and observe the error messages in both the client output and the Mosquitto log. Document each error and its cause.
+
+3. **Configure a bridge to SiliconWit.io.** Register a device on [siliconwit.io](https://siliconwit.io) and note your device ID and access token. Configure a Mosquitto bridge that forwards all messages under `sensors/#` to the cloud topic `d/{device_id}/t`. Publish test messages locally and verify they appear on the SiliconWit.io dashboard. Then disconnect your internet connection for 30 seconds while continuing to publish locally. Reconnect and verify that the queued messages arrive at the cloud (this tests `cleansession false` on the bridge). Measure the delay between reconnection and message delivery.
+
+4. **Deploy Mosquitto in Docker with persistence testing.** Set up the Docker deployment described in this lesson. Publish 10 retained messages to different topics. Stop the container with `docker compose down`, then start it again. Subscribe to the retained topics and verify all 10 messages survived the restart (this tests that the persistence volume mount works correctly). Then run a load test: use a bash loop to publish 1000 messages as fast as possible and check `$SYS/broker/messages/received` to confirm all 1000 arrived. Record the messages-per-second rate.
+
+## Summary
+
+<InArticleAd />
+
+
+You built a production-ready Mosquitto MQTT broker from scratch. Starting with the MQTT fundamentals (publish/subscribe, QoS 0/1/2, retained messages, last will, persistent sessions), you installed Mosquitto on Linux and configured password authentication with `mosquitto_passwd`. You wrote topic ACLs that restrict each user to specific read and write permissions, including pattern-based rules with `%u` and `%c` for scalable device provisioning. You generated a self-signed CA and server certificate with OpenSSL, configured TLS on port 8883, and tested encrypted connections with the command-line tools. You connected to the SiliconWit.io platform using device credentials and its `d/{device_id}/t` topic structure. You added WebSocket support for browser clients and configured a bridge to forward local sensor data to the cloud automatically. Finally, you explored $SYS monitoring topics, logging best practices, and Docker deployment with persistent volumes. In the next lesson, you will write MQTT client firmware for ESP32, RPi Pico W, and STM32 that connects to this broker.
+
+<IoTSystemsComments />
+
+
+
+<InArticleAd />
+<TawkWidget />
+<Copyright />

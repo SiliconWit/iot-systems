@@ -1,0 +1,1429 @@
+---
+title: "IoT Architecture and Protocol Comparison"
+description: "Survey IoT system architectures and compare MQTT, CoAP, and HTTP side by side. Send the same BME280 sensor data over all three protocols from an ESP32 and measure bandwidth, latency, and power consumption to make informed protocol choices."
+contributors: "sam-macharia,lawrence-langat,john-kibe"
+pubDate: 2026-03-10
+tags: ["iot", "mqtt", "coap", "http", "esp32", "bme280", "protocols", "architecture", "siliconwit-io"]
+excerpt: "Compare IoT architectures and protocols hands-on. Implement MQTT, CoAP, and HTTP on the same ESP32 with a BME280 sensor, measure message sizes and round-trip times, and learn when to choose each protocol for your IoT deployment."
+heroImage: "https://cdn.siliconwit.com/education/iot-systems/iot-architecture-protocol-comparison.png"
+---
+
+import TawkWidget from '../../../../components/TawkWidget.astro';
+import UniversalContentContributors from '../../../../components/UniversalContentContributors.astro';
+import InArticleAd from '../../../../components/InArticleAd.astro';
+import Copyright from '../../../../components/Copyright.astro';
+import BionicText from '../../../../components/BionicText.astro';
+import TailwindWrapper from '../../../../components/TailwindWrapper.jsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/starlight/components';
+
+<UniversalContentContributors 
+  contributors={frontmatter.contributors}
+/>
+
+
+
+import IoTSystemsComments from '../../../../components/iot-systems/IoTSystemsComments.astro';
+
+Choosing the right communication protocol is the first real engineering decision in any IoT project. MQTT, CoAP, and HTTP all move sensor data from device to server, but they differ dramatically in bandwidth, latency, power consumption, and reliability. In this lesson you will implement all three protocols on the same ESP32 with the same BME280 sensor, measure the differences with real numbers, and walk away with a clear mental model for when to use each one. #IoT #MQTT #Protocols
+
+## What We Are Building
+
+<Card title="Protocol Comparison Bench" icon="star">
+A single ESP32 reads temperature, humidity, and pressure from a BME280 sensor, then transmits the same JSON payload over MQTT, CoAP, and HTTP to three separate endpoints. Software timing captures the round-trip time and payload size for each protocol. A Python script on the receiving end logs every message so you can compare bandwidth, latency, and reliability across protocols.
+</Card>
+
+**Project specifications:**
+
+| Parameter | Value |
+|-----------|-------|
+| MCU | ESP32 DevKitC |
+| Sensor | BME280 (I2C, 0x76 or 0x77) |
+| MQTT Broker | Mosquitto on localhost:1883 (or mqtt.siliconwit.io:8883 with TLS) |
+| CoAP Server | Python aiocoap server on port 5683 |
+| HTTP Server | FastAPI on port 8000 |
+| Payload Format | JSON |
+| Measurement | Round-trip time (us), payload bytes, heap usage |
+
+### Bill of Materials
+
+| Ref | Component | Quantity | Notes |
+|-----|-----------|----------|-------|
+| U1 | ESP32 DevKitC | 1 | Reuse from ESP32 course |
+| U2 | BME280 breakout module | 1 | I2C, 3.3V compatible |
+| | Breadboard + jumper wires | 1 set | |
+
+## IoT System Architectures
+
+<InArticleAd />
+
+
+Before comparing protocols, you need to understand the network topologies that IoT systems use. The architecture you choose determines which protocols are practical, how data flows, and where processing happens.
+
+### Star Topology
+
+In a star topology, every device connects directly to a central server or broker. This is the simplest architecture. Each sensor node has its own network connection (Wi-Fi, cellular, Ethernet) and sends data to the cloud or a local server without any intermediary.
+
+**Advantages:**
+- Simple to implement and debug
+- Each device is independent; one failing does not affect others
+- Low latency because there is no hop between devices
+
+**Disadvantages:**
+- Every device needs its own internet connection
+- Not practical for battery-powered devices in remote locations
+- Central server is a single point of failure
+
+**Best for:** Wi-Fi connected devices in buildings, cellular IoT with SIM cards, small deployments (fewer than 50 devices).
+
+### Mesh Topology
+
+In a mesh network, devices relay messages for each other. A sensor node that cannot reach the server directly passes its data through neighboring nodes until it reaches a gateway with internet access. Protocols like Zigbee, Thread, and BLE Mesh use this approach.
+
+**Advantages:**
+- Extended range without additional infrastructure
+- Self-healing: if one node fails, traffic routes around it
+- Low power per node (short-range radio hops)
+
+**Disadvantages:**
+- Higher latency due to multi-hop routing
+- More complex firmware (routing tables, neighbor discovery)
+- Throughput decreases as the network grows
+
+**Best for:** Large sensor networks (100+ nodes), agricultural monitoring, building automation, industrial floors.
+
+### Gateway Architecture
+
+A gateway sits between constrained devices and the cloud. Local devices communicate with the gateway using lightweight protocols (BLE, Zigbee, LoRa, UART), and the gateway translates and forwards data to the cloud over Wi-Fi, Ethernet, or cellular. A Raspberry Pi running an MQTT bridge is a classic example.
+
+**Advantages:**
+- Constrained devices do not need IP networking
+- Gateway handles protocol translation, buffering, and encryption
+- Reduces cloud bandwidth (gateway can aggregate and filter)
+
+**Disadvantages:**
+- Gateway is a single point of failure for its local devices
+- Adds one more piece of hardware to maintain
+- Firmware updates require managing two different platforms
+
+**Best for:** Mixed-protocol environments, LoRa/BLE sensor networks, brownfield retrofits where sensors cannot reach Wi-Fi directly.
+
+### Edge/Fog Computing
+
+Edge computing pushes processing closer to the data source. Instead of sending raw sensor readings to the cloud, an edge node (gateway, local server, or powerful MCU) runs analytics, filtering, or ML inference locally. Only results, anomalies, or aggregated summaries go to the cloud.
+
+**Advantages:**
+- Dramatically reduces cloud bandwidth and storage costs
+- Lower latency for time-critical decisions (safety shutoffs, motor control)
+- Works during internet outages (local autonomy)
+
+**Disadvantages:**
+- More capable (and expensive) hardware at the edge
+- Distributed processing is harder to debug and update
+- Data governance becomes more complex (where is the authoritative copy?)
+
+**Best for:** Video analytics, predictive maintenance, real-time control loops, bandwidth-constrained sites (satellite links, remote facilities).
+
+<CardGrid>
+  <Card title="This Course Uses Star + Gateway" icon="information">
+    Most lessons in this course use a star topology: ESP32 devices connect directly to an MQTT broker over Wi-Fi. In Lesson 3 you will also see the gateway pattern when an STM32 sends data through an ESP-01 Wi-Fi module. The edge computing pattern appears in Lesson 8 when the Raspberry Pi runs local analytics before forwarding to the cloud.
+  </Card>
+</CardGrid>
+
+## The Three Main IoT Protocols
+
+<InArticleAd />
+
+
+Every IoT protocol solves the same fundamental problem: how does a small device with limited memory, CPU, and battery send data to a server reliably? The three dominant protocols take very different approaches.
+
+### MQTT (Message Queuing Telemetry Transport)
+
+MQTT uses a **publish/subscribe** model over TCP. Devices never talk to each other directly. Instead, they communicate through a central **broker**. A device that has data **publishes** a message to a **topic** (a hierarchical string like `site/building/floor/room/device/sensor`). Any device that wants that data **subscribes** to the same topic. The broker routes messages from publishers to all matching subscribers.
+
+**Key characteristics:**
+- Runs over TCP (port 1883 plain, 8883 TLS)
+- Persistent connections: the device opens one TCP connection and keeps it alive with periodic PINGREQ/PINGRESP packets
+- Three QoS levels: 0 (fire and forget), 1 (at least once), 2 (exactly once)
+- Retained messages: the broker stores the last message on a topic and delivers it immediately to new subscribers
+- Last Will and Testament: the broker publishes a predefined message if a device disconnects unexpectedly
+- Minimal overhead: a PUBLISH packet with QoS 0 adds only 2 bytes of header to the payload
+
+**When to use MQTT:**
+- You need real-time push from device to server (or server to device)
+- Devices are behind firewalls or NAT (outbound TCP works everywhere)
+- You want decoupled publishers and subscribers
+- Battery life matters (one persistent connection beats repeated HTTP handshakes)
+
+### CoAP (Constrained Application Protocol)
+
+CoAP uses a **request/response** model over UDP. It was designed for extremely constrained devices (8-bit MCUs with 10 KB of RAM) that cannot afford TCP's overhead. CoAP messages are compact binary packets with a 4-byte fixed header. The protocol supports GET, PUT, POST, and DELETE methods, making it feel like a lightweight HTTP.
+
+**Key characteristics:**
+- Runs over UDP (port 5683 plain, 5684 DTLS)
+- Connectionless: no persistent connection, no TCP handshake
+- Confirmable (CON) and non-confirmable (NON) message types for reliability control
+- Observe option: a client can subscribe to a resource and receive notifications when it changes (similar to MQTT subscriptions but resource-based)
+- Block-wise transfer for payloads larger than one UDP datagram
+- Content negotiation via media type options (application/json, application/cbor)
+
+**When to use CoAP:**
+- Devices are extremely RAM/ROM constrained
+- The network is lossy and you want fast recovery (UDP retransmit is simpler than TCP backoff)
+- You need a REST-like interface on the device itself (e.g., reading a sensor value with GET)
+- Multicast discovery is needed (CoAP supports UDP multicast)
+
+### HTTP (Hypertext Transfer Protocol)
+
+HTTP is the universal protocol of the web. Every server, every browser, every proxy, every CDN speaks HTTP. For IoT, HTTP means POSTing JSON to a REST API endpoint. It works, it is well understood, and every cloud platform has an HTTP ingestion endpoint.
+
+**Key characteristics:**
+- Runs over TCP (port 80 plain, 443 TLS)
+- Stateless: every request is independent, no persistent session by default
+- Text-based headers add significant overhead (often 500+ bytes per request)
+- TLS handshake is expensive on constrained devices (CPU, memory, time)
+- Universal firewall and proxy compatibility
+- Native browser support (fetch, XMLHttpRequest, WebSocket upgrade)
+
+**When to use HTTP:**
+- You are integrating with existing web services or REST APIs
+- Data is sent infrequently (once per minute or less)
+- The device has plenty of RAM and a fast CPU (ESP32, Raspberry Pi)
+- You need browser-based device interaction without a broker
+
+## Protocol Comparison Table
+
+<InArticleAd />
+
+
+| Feature | MQTT | CoAP | HTTP |
+|---------|------|------|------|
+| **Transport** | TCP | UDP | TCP |
+| **Default Port** | 1883 / 8883 (TLS) | 5683 / 5684 (DTLS) | 80 / 443 (TLS) |
+| **Model** | Publish/Subscribe | Request/Response | Request/Response |
+| **Header Overhead** | 2 bytes minimum | 4 bytes fixed | 200-800+ bytes |
+| **Payload Format** | Any (binary, JSON, CBOR) | Any (binary, JSON, CBOR) | Any (typically JSON) |
+| **Persistent Connection** | Yes (keep-alive) | No (UDP) | Optional (HTTP/1.1 keep-alive) |
+| **Reliability** | QoS 0/1/2 | CON/NON + retransmit | TCP guarantees delivery |
+| **Latency** | Low (persistent conn) | Very low (no handshake) | High (TCP + TLS handshake per request) |
+| **Bandwidth** | Very low | Lowest | High |
+| **Power Consumption** | Low (sleep between pings) | Lowest (no connection to maintain) | Highest (full handshake each time) |
+| **Firewall Friendly** | Yes (outbound TCP) | Sometimes blocked (UDP) | Yes (ports 80/443 always open) |
+| **Browser Support** | Via WebSocket bridge | No native support | Native |
+| **NAT Traversal** | Yes (persistent TCP) | Difficult (UDP, needs NAT binding) | Yes (standard HTTP) |
+| **Bidirectional** | Yes (subscribe) | Yes (observe) | No (requires polling or WebSocket) |
+| **Multicast** | No | Yes (UDP multicast) | No |
+| **Best For** | Real-time telemetry, alerts | Constrained devices, LAN | Web integration, infrequent uploads |
+
+## Circuit Connections
+
+<InArticleAd />
+
+
+Connect the BME280 to the ESP32 via I2C:
+
+| ESP32 Pin | BME280 Pin | Notes |
+|-----------|------------|-------|
+| GPIO 21 (SDA) | SDA | I2C data |
+| GPIO 22 (SCL) | SCL | I2C clock |
+| 3.3V | VIN (or VCC) | Power supply |
+| GND | GND | Common ground |
+
+If your BME280 module has a voltage regulator (most breakout boards do), you can power it from 3.3V. Check the address jumper: the default I2C address is 0x76 (SDO pulled low) or 0x77 (SDO pulled high).
+
+## MQTT Implementation
+
+<InArticleAd />
+
+
+We will use the Arduino framework with PubSubClient for the MQTT implementation. This keeps the code focused on the protocol differences rather than ESP-IDF boilerplate.
+
+### Arduino Setup
+
+<Steps>
+1. Install Arduino IDE or PlatformIO.
+
+2. Install the following libraries:
+   - **PubSubClient** by Nick O'Leary (MQTT client)
+   - **Adafruit BME280** (sensor driver)
+   - **Adafruit Unified Sensor** (dependency)
+   - **ArduinoJson** (JSON serialization)
+
+3. Select the ESP32 Dev Module as your board.
+</Steps>
+
+### MQTT Code
+
+```cpp title="mqtt_sender.ino"
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <Wire.h>
+#include <Adafruit_BME280.h>
+#include <ArduinoJson.h>
+
+/* ---- Configuration ---- */
+const char* WIFI_SSID     = "YourSSID";
+const char* WIFI_PASS     = "YourPassword";
+
+/* Option A: Self-hosted Mosquitto (no TLS) */
+const char* MQTT_SERVER   = "192.168.1.100";
+const int   MQTT_PORT     = 1883;
+
+/* Option B: SiliconWit.io (TLS on port 8883)
+ * See siliconwit.io (Dashboard -> Devices) for connection details.
+ * For TLS you need WiFiClientSecure instead of WiFiClient.
+ */
+
+const char* MQTT_USER     = "esp32";
+const char* MQTT_PASS     = "changeme";
+const char* MQTT_TOPIC    = "site/lab/bench1/esp32/bme280";
+const char* DEVICE_ID     = "esp32-proto-bench";
+
+/* ---- Objects ---- */
+WiFiClient   wifiClient;
+PubSubClient mqttClient(wifiClient);
+Adafruit_BME280 bme;
+
+/* ---- Wi-Fi connect ---- */
+void wifi_connect() {
+    Serial.printf("Connecting to %s", WIFI_SSID);
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.printf("\nConnected, IP: %s\n", WiFi.localIP().toString().c_str());
+}
+
+/* ---- MQTT connect ---- */
+void mqtt_connect() {
+    mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
+    while (!mqttClient.connected()) {
+        Serial.print("MQTT connecting...");
+        if (mqttClient.connect(DEVICE_ID, MQTT_USER, MQTT_PASS)) {
+            Serial.println("connected");
+        } else {
+            Serial.printf("failed, rc=%d, retrying in 2s\n", mqttClient.state());
+            delay(2000);
+        }
+    }
+}
+
+/* ---- Build JSON payload ---- */
+String build_payload(float temp, float hum, float pres) {
+    JsonDocument doc;
+    doc["device_id"]    = DEVICE_ID;
+    doc["timestamp_ms"] = millis();
+    doc["temperature_c"] = serialized(String(temp, 2));
+    doc["humidity_pct"]  = serialized(String(hum, 2));
+    doc["pressure_hpa"]  = serialized(String(pres, 2));
+
+    String output;
+    serializeJson(doc, output);
+    return output;
+}
+
+/* ---- Send via MQTT and measure ---- */
+void send_mqtt(float temp, float hum, float pres) {
+    if (!mqttClient.connected()) {
+        mqtt_connect();
+    }
+    mqttClient.loop();
+
+    String payload = build_payload(temp, hum, pres);
+
+    unsigned long start_us = micros();
+    bool ok = mqttClient.publish(MQTT_TOPIC, payload.c_str());
+    unsigned long elapsed_us = micros() - start_us;
+
+    Serial.printf("[MQTT] %s | %d bytes | %lu us | %s\n",
+                  ok ? "OK" : "FAIL",
+                  payload.length(),
+                  elapsed_us,
+                  payload.c_str());
+}
+
+/* ---- Setup ---- */
+void setup() {
+    Serial.begin(115200);
+    delay(1000);
+
+    Wire.begin(21, 22);
+    if (!bme.begin(0x76)) {
+        Serial.println("BME280 not found, check wiring");
+        while (1) delay(1000);
+    }
+    Serial.println("BME280 initialized");
+
+    wifi_connect();
+    mqtt_connect();
+}
+
+/* ---- Loop ---- */
+void loop() {
+    float temp = bme.readTemperature();
+    float hum  = bme.readHumidity();
+    float pres = bme.readPressure() / 100.0F;
+
+    send_mqtt(temp, hum, pres);
+
+    delay(10000);  /* Send every 10 seconds for testing */
+}
+```
+
+### MQTT with TLS (SiliconWit.io)
+
+To connect to mqtt.siliconwit.io on port 8883 with TLS, replace `WiFiClient` with `WiFiClientSecure` and load the server's root CA certificate:
+
+```cpp title="mqtt_tls_snippet.ino"
+#include <WiFiClientSecure.h>
+
+/* Root CA for mqtt.siliconwit.io (replace with actual cert) */
+const char* root_ca = R"EOF(
+-----BEGIN CERTIFICATE-----
+MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
+... (paste the full certificate from siliconwit.io) ...
+-----END CERTIFICATE-----
+)EOF";
+
+WiFiClientSecure secureClient;
+PubSubClient mqttClient(secureClient);
+
+void mqtt_connect_tls() {
+    secureClient.setCACert(root_ca);
+    mqttClient.setServer("mqtt.siliconwit.io", 8883);
+
+    while (!mqttClient.connected()) {
+        Serial.print("MQTT TLS connecting...");
+        if (mqttClient.connect(DEVICE_ID, MQTT_USER, MQTT_PASS)) {
+            Serial.println("connected with TLS");
+        } else {
+            Serial.printf("failed, rc=%d\n", mqttClient.state());
+            delay(2000);
+        }
+    }
+}
+```
+
+SiliconWit.io accepts MQTT, CoAP, and HTTP. Connection details, certificates, and API keys are available at [siliconwit.io](https://siliconwit.io) (Dashboard -> Devices).
+
+## CoAP Implementation
+
+<InArticleAd />
+
+
+CoAP runs over UDP, so the ESP32 does not need a persistent TCP connection. We use a lightweight CoAP library that builds the binary packet manually.
+
+### CoAP Client Code
+
+```cpp title="coap_sender.ino"
+#include <WiFi.h>
+#include <WiFiUdp.h>
+#include <Wire.h>
+#include <Adafruit_BME280.h>
+#include <ArduinoJson.h>
+
+/* ---- Configuration ---- */
+const char* WIFI_SSID    = "YourSSID";
+const char* WIFI_PASS    = "YourPassword";
+const char* COAP_SERVER  = "192.168.1.100";
+const int   COAP_PORT    = 5683;
+const char* COAP_PATH    = "sensor/bme280";
+const char* DEVICE_ID    = "esp32-proto-bench";
+
+/* ---- Objects ---- */
+WiFiUDP udp;
+Adafruit_BME280 bme;
+
+/* ---- CoAP message IDs ---- */
+uint16_t coap_msg_id = 0;
+
+/* ---- Build a minimal CoAP POST packet ---- */
+/*
+ * CoAP header (4 bytes):
+ *   Ver=1, Type=CON(0), TKL=1, Code=POST(0.02)
+ *   Message ID (2 bytes)
+ * Token (1 byte)
+ * Options:
+ *   Uri-Path option (number 11)
+ *   Content-Format option (number 12, value 50 = application/json)
+ * Payload marker (0xFF) + payload
+ */
+int build_coap_post(uint8_t* buf, int buf_size,
+                    const char* path, const uint8_t* payload, int payload_len) {
+    int pos = 0;
+
+    /* Header */
+    buf[pos++] = 0x41;  /* Ver=1, Type=CON(0), TKL=1 */
+    buf[pos++] = 0x02;  /* Code: 0.02 = POST */
+    buf[pos++] = (coap_msg_id >> 8) & 0xFF;
+    buf[pos++] = coap_msg_id & 0xFF;
+    coap_msg_id++;
+
+    /* Token (1 byte) */
+    buf[pos++] = 0xAB;
+
+    /* Uri-Path option (delta=11, length=strlen(path)) */
+    /* Split path by '/' segments */
+    char path_copy[64];
+    strncpy(path_copy, path, sizeof(path_copy) - 1);
+    path_copy[sizeof(path_copy) - 1] = '\0';
+
+    int prev_option = 0;
+    char* segment = strtok(path_copy, "/");
+    while (segment != NULL) {
+        int slen = strlen(segment);
+        int delta = 11 - prev_option;
+        prev_option = 11;
+
+        if (delta < 13 && slen < 13) {
+            buf[pos++] = (delta << 4) | slen;
+        } else {
+            /* Extended option encoding for longer paths */
+            buf[pos++] = (delta << 4) | slen;
+        }
+        memcpy(&buf[pos], segment, slen);
+        pos += slen;
+
+        /* Subsequent Uri-Path options have delta=0 */
+        segment = strtok(NULL, "/");
+        if (segment != NULL) {
+            prev_option = 11;  /* Same option number, delta=0 next time */
+            int next_len = strlen(segment);
+            buf[pos++] = (0 << 4) | next_len;  /* delta=0 */
+            memcpy(&buf[pos], segment, next_len);
+            pos += next_len;
+            segment = strtok(NULL, "/");
+        }
+    }
+
+    /* Content-Format option (delta = 12 - 11 = 1, value = 50) */
+    buf[pos++] = (1 << 4) | 1;  /* delta=1, length=1 */
+    buf[pos++] = 50;             /* application/json */
+
+    /* Payload marker */
+    buf[pos++] = 0xFF;
+
+    /* Payload */
+    if (pos + payload_len > buf_size) return -1;
+    memcpy(&buf[pos], payload, payload_len);
+    pos += payload_len;
+
+    return pos;
+}
+
+/* ---- Build JSON payload ---- */
+String build_payload(float temp, float hum, float pres) {
+    JsonDocument doc;
+    doc["device_id"]     = DEVICE_ID;
+    doc["timestamp_ms"]  = millis();
+    doc["temperature_c"] = serialized(String(temp, 2));
+    doc["humidity_pct"]  = serialized(String(hum, 2));
+    doc["pressure_hpa"]  = serialized(String(pres, 2));
+
+    String output;
+    serializeJson(doc, output);
+    return output;
+}
+
+/* ---- Send via CoAP and measure ---- */
+void send_coap(float temp, float hum, float pres) {
+    String payload = build_payload(temp, hum, pres);
+
+    uint8_t packet[512];
+    int pkt_len = build_coap_post(packet, sizeof(packet),
+                                   COAP_PATH,
+                                   (const uint8_t*)payload.c_str(),
+                                   payload.length());
+    if (pkt_len < 0) {
+        Serial.println("[CoAP] Packet too large");
+        return;
+    }
+
+    unsigned long start_us = micros();
+
+    udp.beginPacket(COAP_SERVER, COAP_PORT);
+    udp.write(packet, pkt_len);
+    udp.endPacket();
+
+    /* Wait for ACK (up to 2 seconds) */
+    bool ack_received = false;
+    unsigned long timeout = millis() + 2000;
+    while (millis() < timeout) {
+        int reply_len = udp.parsePacket();
+        if (reply_len > 0) {
+            uint8_t reply[64];
+            udp.read(reply, sizeof(reply));
+            /* Check for ACK type (0x60 = Ver=1, Type=ACK, TKL=0) */
+            if ((reply[0] & 0x30) == 0x20) {
+                ack_received = true;
+                break;
+            }
+        }
+        delay(1);
+    }
+
+    unsigned long elapsed_us = micros() - start_us;
+
+    Serial.printf("[CoAP] %s | %d bytes (packet: %d) | %lu us | %s\n",
+                  ack_received ? "ACK" : "TIMEOUT",
+                  payload.length(), pkt_len,
+                  elapsed_us,
+                  payload.c_str());
+}
+
+/* ---- Wi-Fi connect ---- */
+void wifi_connect() {
+    Serial.printf("Connecting to %s", WIFI_SSID);
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.printf("\nConnected, IP: %s\n", WiFi.localIP().toString().c_str());
+}
+
+/* ---- Setup ---- */
+void setup() {
+    Serial.begin(115200);
+    delay(1000);
+
+    Wire.begin(21, 22);
+    if (!bme.begin(0x76)) {
+        Serial.println("BME280 not found, check wiring");
+        while (1) delay(1000);
+    }
+    Serial.println("BME280 initialized");
+
+    wifi_connect();
+    udp.begin(COAP_PORT + 1);  /* Local port for receiving ACKs */
+}
+
+/* ---- Loop ---- */
+void loop() {
+    float temp = bme.readTemperature();
+    float hum  = bme.readHumidity();
+    float pres = bme.readPressure() / 100.0F;
+
+    send_coap(temp, hum, pres);
+
+    delay(10000);
+}
+```
+
+### CoAP Server (Python)
+
+Run this on your development machine to receive CoAP POST requests:
+
+```python title="coap_server.py"
+import asyncio
+import aiocoap
+import aiocoap.resource as resource
+import json
+from datetime import datetime
+
+class SensorResource(resource.Resource):
+    """Handles POST requests with sensor data."""
+
+    async def render_post(self, request):
+        try:
+            data = json.loads(request.payload.decode("utf-8"))
+            ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            print(f"[{ts}] CoAP POST from {data.get('device_id', 'unknown')}:")
+            print(f"  Temperature: {data.get('temperature_c')} C")
+            print(f"  Humidity:    {data.get('humidity_pct')} %")
+            print(f"  Pressure:    {data.get('pressure_hpa')} hPa")
+            print(f"  Payload size: {len(request.payload)} bytes")
+            print()
+        except json.JSONDecodeError:
+            print(f"Invalid JSON: {request.payload}")
+
+        return aiocoap.Message(
+            code=aiocoap.CHANGED,
+            payload=b'{"status":"ok"}'
+        )
+
+async def main():
+    root = resource.Site()
+    root.add_resource(["sensor", "bme280"], SensorResource())
+
+    await aiocoap.Context.create_server_context(root, bind=("0.0.0.0", 5683))
+    print("CoAP server listening on port 5683")
+    await asyncio.get_event_loop().create_future()  # Run forever
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Install the dependency with:
+
+```bash title="Terminal"
+pip install aiocoap
+```
+
+## HTTP Implementation
+
+<InArticleAd />
+
+
+HTTP is the simplest protocol to implement on the ESP32 because the Arduino core includes a full HTTP client. The trade-off is overhead: every request carries text headers, and TLS requires a full handshake unless you use HTTP/1.1 keep-alive.
+
+### HTTP Client Code
+
+```cpp title="http_sender.ino"
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <Wire.h>
+#include <Adafruit_BME280.h>
+#include <ArduinoJson.h>
+
+/* ---- Configuration ---- */
+const char* WIFI_SSID   = "YourSSID";
+const char* WIFI_PASS   = "YourPassword";
+const char* HTTP_URL    = "http://192.168.1.100:8000/api/sensor";
+const char* DEVICE_ID   = "esp32-proto-bench";
+
+/* ---- Objects ---- */
+Adafruit_BME280 bme;
+
+/* ---- Build JSON payload ---- */
+String build_payload(float temp, float hum, float pres) {
+    JsonDocument doc;
+    doc["device_id"]     = DEVICE_ID;
+    doc["timestamp_ms"]  = millis();
+    doc["temperature_c"] = serialized(String(temp, 2));
+    doc["humidity_pct"]  = serialized(String(hum, 2));
+    doc["pressure_hpa"]  = serialized(String(pres, 2));
+
+    String output;
+    serializeJson(doc, output);
+    return output;
+}
+
+/* ---- Send via HTTP POST and measure ---- */
+void send_http(float temp, float hum, float pres) {
+    HTTPClient http;
+    String payload = build_payload(temp, hum, pres);
+
+    unsigned long start_us = micros();
+
+    http.begin(HTTP_URL);
+    http.addHeader("Content-Type", "application/json");
+
+    int httpCode = http.POST(payload);
+    String response = http.getString();
+
+    unsigned long elapsed_us = micros() - start_us;
+
+    Serial.printf("[HTTP] %d | %d bytes | %lu us | %s\n",
+                  httpCode,
+                  payload.length(),
+                  elapsed_us,
+                  payload.c_str());
+
+    http.end();
+}
+
+/* ---- Wi-Fi connect ---- */
+void wifi_connect() {
+    Serial.printf("Connecting to %s", WIFI_SSID);
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.printf("\nConnected, IP: %s\n", WiFi.localIP().toString().c_str());
+}
+
+/* ---- Setup ---- */
+void setup() {
+    Serial.begin(115200);
+    delay(1000);
+
+    Wire.begin(21, 22);
+    if (!bme.begin(0x76)) {
+        Serial.println("BME280 not found, check wiring");
+        while (1) delay(1000);
+    }
+    Serial.println("BME280 initialized");
+
+    wifi_connect();
+}
+
+/* ---- Loop ---- */
+void loop() {
+    float temp = bme.readTemperature();
+    float hum  = bme.readHumidity();
+    float pres = bme.readPressure() / 100.0F;
+
+    send_http(temp, hum, pres);
+
+    delay(10000);
+}
+```
+
+### HTTP Server (FastAPI)
+
+```python title="http_server.py"
+from fastapi import FastAPI, Request
+from datetime import datetime
+import uvicorn
+
+app = FastAPI()
+
+@app.post("/api/sensor")
+async def receive_sensor_data(request: Request):
+    data = await request.json()
+    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    print(f"[{ts}] HTTP POST from {data.get('device_id', 'unknown')}:")
+    print(f"  Temperature: {data.get('temperature_c')} C")
+    print(f"  Humidity:    {data.get('humidity_pct')} %")
+    print(f"  Pressure:    {data.get('pressure_hpa')} hPa")
+    content_length = request.headers.get("content-length", "unknown")
+    print(f"  Content-Length: {content_length} bytes")
+    print()
+    return {"status": "ok"}
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+```
+
+Install the dependencies with:
+
+```bash title="Terminal"
+pip install fastapi uvicorn
+```
+
+## Combined Protocol Bench
+
+<InArticleAd />
+
+
+The most informative way to compare protocols is to run all three from the same firmware, one after another, using the same sensor reading. This eliminates variables like network conditions changing between tests.
+
+```cpp title="protocol_bench.ino"
+#include <WiFi.h>
+#include <WiFiUdp.h>
+#include <HTTPClient.h>
+#include <PubSubClient.h>
+#include <Wire.h>
+#include <Adafruit_BME280.h>
+#include <ArduinoJson.h>
+
+/* ---- Configuration ---- */
+const char* WIFI_SSID     = "YourSSID";
+const char* WIFI_PASS     = "YourPassword";
+const char* DEVICE_ID     = "esp32-proto-bench";
+
+/* MQTT */
+const char* MQTT_SERVER   = "192.168.1.100";
+const int   MQTT_PORT     = 1883;
+const char* MQTT_USER     = "esp32";
+const char* MQTT_PASS     = "changeme";
+const char* MQTT_TOPIC    = "site/lab/bench1/esp32/bme280";
+
+/* CoAP */
+const char* COAP_SERVER   = "192.168.1.100";
+const int   COAP_PORT     = 5683;
+const char* COAP_PATH     = "sensor/bme280";
+
+/* HTTP */
+const char* HTTP_URL      = "http://192.168.1.100:8000/api/sensor";
+
+/* ---- Objects ---- */
+WiFiClient   wifiClient;
+PubSubClient mqttClient(wifiClient);
+WiFiUDP      udp;
+Adafruit_BME280 bme;
+
+/* ---- Timing results ---- */
+struct BenchResult {
+    const char* protocol;
+    int payload_bytes;
+    int wire_bytes;  /* Total bytes on the wire (estimated) */
+    unsigned long rtt_us;
+    bool success;
+};
+
+uint16_t coap_msg_id = 0;
+
+/* ---- Build JSON payload ---- */
+String build_payload(float temp, float hum, float pres) {
+    JsonDocument doc;
+    doc["device_id"]     = DEVICE_ID;
+    doc["timestamp_ms"]  = millis();
+    doc["temperature_c"] = serialized(String(temp, 2));
+    doc["humidity_pct"]  = serialized(String(hum, 2));
+    doc["pressure_hpa"]  = serialized(String(pres, 2));
+
+    String output;
+    serializeJson(doc, output);
+    return output;
+}
+
+/* ---- MQTT bench ---- */
+BenchResult bench_mqtt(const String& payload) {
+    BenchResult r = {"MQTT", (int)payload.length(), 0, 0, false};
+
+    if (!mqttClient.connected()) {
+        mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
+        mqttClient.connect(DEVICE_ID, MQTT_USER, MQTT_PASS);
+    }
+    mqttClient.loop();
+
+    /* MQTT overhead: 2-byte fixed header + topic length + 2 bytes topic len field */
+    r.wire_bytes = 2 + 2 + strlen(MQTT_TOPIC) + payload.length();
+
+    unsigned long start = micros();
+    r.success = mqttClient.publish(MQTT_TOPIC, payload.c_str());
+    r.rtt_us = micros() - start;
+
+    return r;
+}
+
+/* ---- CoAP bench ---- */
+BenchResult bench_coap(const String& payload) {
+    BenchResult r = {"CoAP", (int)payload.length(), 0, 0, false};
+
+    uint8_t packet[512];
+    int pos = 0;
+
+    /* CoAP header */
+    packet[pos++] = 0x41;  /* CON, TKL=1 */
+    packet[pos++] = 0x02;  /* POST */
+    packet[pos++] = (coap_msg_id >> 8) & 0xFF;
+    packet[pos++] = coap_msg_id & 0xFF;
+    coap_msg_id++;
+    packet[pos++] = 0xAB;  /* Token */
+
+    /* Uri-Path: "sensor" (delta=11, len=6) */
+    packet[pos++] = (11 << 4) | 6;
+    memcpy(&packet[pos], "sensor", 6);
+    pos += 6;
+
+    /* Uri-Path: "bme280" (delta=0, len=6) */
+    packet[pos++] = (0 << 4) | 6;
+    memcpy(&packet[pos], "bme280", 6);
+    pos += 6;
+
+    /* Content-Format: application/json (delta=1, len=1, val=50) */
+    packet[pos++] = (1 << 4) | 1;
+    packet[pos++] = 50;
+
+    /* Payload marker + payload */
+    packet[pos++] = 0xFF;
+    memcpy(&packet[pos], payload.c_str(), payload.length());
+    pos += payload.length();
+
+    r.wire_bytes = pos + 8;  /* +8 for UDP header */
+
+    unsigned long start = micros();
+
+    udp.beginPacket(COAP_SERVER, COAP_PORT);
+    udp.write(packet, pos);
+    udp.endPacket();
+
+    /* Wait for ACK */
+    unsigned long timeout = millis() + 2000;
+    while (millis() < timeout) {
+        int reply_len = udp.parsePacket();
+        if (reply_len > 0) {
+            uint8_t reply[64];
+            udp.read(reply, sizeof(reply));
+            if ((reply[0] & 0x30) == 0x20) {
+                r.success = true;
+                break;
+            }
+        }
+        delay(1);
+    }
+
+    r.rtt_us = micros() - start;
+    return r;
+}
+
+/* ---- HTTP bench ---- */
+BenchResult bench_http(const String& payload) {
+    BenchResult r = {"HTTP", (int)payload.length(), 0, 0, false};
+
+    HTTPClient http;
+
+    unsigned long start = micros();
+
+    http.begin(HTTP_URL);
+    http.addHeader("Content-Type", "application/json");
+    int code = http.POST(payload);
+    http.getString();  /* Read response to complete the transaction */
+
+    r.rtt_us = micros() - start;
+    r.success = (code == 200);
+
+    /* Estimate HTTP overhead: method + URL + headers + payload */
+    r.wire_bytes = payload.length() + 350;  /* ~350 bytes of HTTP headers */
+
+    http.end();
+    return r;
+}
+
+/* ---- Print results ---- */
+void print_results(BenchResult results[], int count) {
+    Serial.println("\n========== PROTOCOL COMPARISON ==========");
+    Serial.printf("%-8s | %-8s | %-10s | %-10s | %s\n",
+                  "Proto", "Payload", "Wire(est)", "RTT(us)", "Status");
+    Serial.println("---------+----------+------------+------------+--------");
+
+    for (int i = 0; i < count; i++) {
+        Serial.printf("%-8s | %-8d | %-10d | %-10lu | %s\n",
+                      results[i].protocol,
+                      results[i].payload_bytes,
+                      results[i].wire_bytes,
+                      results[i].rtt_us,
+                      results[i].success ? "OK" : "FAIL");
+    }
+    Serial.println("==========================================\n");
+}
+
+/* ---- Wi-Fi connect ---- */
+void wifi_connect() {
+    Serial.printf("Connecting to %s", WIFI_SSID);
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.printf("\nConnected, IP: %s\n", WiFi.localIP().toString().c_str());
+}
+
+/* ---- Setup ---- */
+void setup() {
+    Serial.begin(115200);
+    delay(1000);
+
+    Wire.begin(21, 22);
+    if (!bme.begin(0x76)) {
+        Serial.println("BME280 not found, check wiring");
+        while (1) delay(1000);
+    }
+    Serial.println("BME280 initialized");
+
+    wifi_connect();
+    udp.begin(5684);  /* Local port for CoAP ACKs */
+}
+
+/* ---- Loop ---- */
+void loop() {
+    float temp = bme.readTemperature();
+    float hum  = bme.readHumidity();
+    float pres = bme.readPressure() / 100.0F;
+
+    String payload = build_payload(temp, hum, pres);
+    Serial.printf("Sensor: %.2f C, %.2f %%, %.2f hPa\n", temp, hum, pres);
+
+    BenchResult results[3];
+    results[0] = bench_mqtt(payload);
+    results[1] = bench_coap(payload);
+    results[2] = bench_http(payload);
+
+    print_results(results, 3);
+
+    delay(15000);  /* Run bench every 15 seconds */
+}
+```
+
+### Expected Serial Output
+
+```text title="Serial Monitor Output"
+Sensor: 23.45 C, 48.12 %, 1013.25 hPa
+
+========== PROTOCOL COMPARISON ==========
+Proto    | Payload  | Wire(est)  | RTT(us)    | Status
+---------+----------+------------+------------+--------
+MQTT     | 128      | 163        | 1842       | OK
+CoAP     | 128      | 157        | 3215       | OK
+HTTP     | 128      | 478        | 28463      | OK
+==========================================
+```
+
+The numbers you see will vary depending on your network, but the relative order is consistent: MQTT is fastest because the TCP connection is already established, CoAP is close but waits for a UDP ACK, and HTTP is slowest because it performs a full TCP handshake and sends verbose headers with every request.
+
+## Measuring and Analyzing Results
+
+<InArticleAd />
+
+
+### What the Numbers Mean
+
+**Payload bytes:** The JSON string you are sending. This is identical across all three protocols (same sensor data, same JSON structure). In our test, approximately 128 bytes.
+
+**Wire bytes (estimated):** The total bytes actually transmitted on the network, including protocol headers:
+- **MQTT:** 2-byte fixed header + 2-byte topic length + topic string + payload. On an existing connection, MQTT adds roughly 35 bytes of overhead. The TCP connection was already established, so there is no handshake cost.
+- **CoAP:** 4-byte fixed header + 1-byte token + options (Uri-Path, Content-Format) + 1-byte payload marker + payload + 8-byte UDP header. Total overhead is about 29 bytes. No connection setup.
+- **HTTP:** The POST request includes the method line, Host header, Content-Type, Content-Length, and other headers. A typical HTTP POST adds 300 to 500 bytes of overhead. If TLS is used, the initial handshake adds several kilobytes.
+
+**RTT (round-trip time):** The time from starting the send to receiving confirmation:
+- **MQTT QoS 0:** The `publish()` call returns as soon as the data is written to the TCP buffer. This is not a true round-trip; it measures only the local write time. For QoS 1, the broker sends a PUBACK, giving a true RTT.
+- **CoAP CON:** The server sends an ACK packet, so the measured time is a genuine round-trip.
+- **HTTP:** The full request/response cycle, including TCP write, server processing, and response read.
+
+### Power Consumption Implications
+
+You cannot directly measure power with software timing alone, but you can reason about it:
+
+| Factor | MQTT | CoAP | HTTP |
+|--------|------|------|------|
+| Radio on time per message | Short (write to existing conn) | Short (one UDP packet + ACK) | Long (TCP handshake + headers + response) |
+| Idle power (connection maintenance) | Low (PINGREQ every 30-60s) | None (connectionless) | None (stateless) |
+| TLS handshake per message | None (done once) | Per session (DTLS) | Per request (unless keep-alive) |
+| Sleep friendliness | Good (reconnect is cheap) | Best (no state to maintain) | Poor (TLS renegotiation is expensive) |
+
+For a battery-powered device that wakes up, reads a sensor, sends data, and goes back to sleep:
+- **CoAP** wins if the device sleeps for minutes between readings (no connection overhead on wake)
+- **MQTT** wins if the device stays awake and sends frequently (amortized connection cost)
+- **HTTP** is rarely the best choice for battery-powered devices
+
+### Running a Proper Benchmark
+
+For statistically meaningful results, run at least 100 iterations per protocol and compute the mean, median, and 95th percentile. Modify the bench loop:
+
+```cpp title="statistical_bench_snippet.ino"
+#define BENCH_ITERATIONS 100
+
+void run_statistical_bench() {
+    unsigned long mqtt_times[BENCH_ITERATIONS];
+    unsigned long coap_times[BENCH_ITERATIONS];
+    unsigned long http_times[BENCH_ITERATIONS];
+
+    for (int i = 0; i < BENCH_ITERATIONS; i++) {
+        float temp = bme.readTemperature();
+        float hum  = bme.readHumidity();
+        float pres = bme.readPressure() / 100.0F;
+        String payload = build_payload(temp, hum, pres);
+
+        BenchResult r_mqtt = bench_mqtt(payload);
+        mqtt_times[i] = r_mqtt.rtt_us;
+
+        delay(100);  /* Small gap between protocols */
+
+        BenchResult r_coap = bench_coap(payload);
+        coap_times[i] = r_coap.rtt_us;
+
+        delay(100);
+
+        BenchResult r_http = bench_http(payload);
+        http_times[i] = r_http.rtt_us;
+
+        delay(500);
+    }
+
+    /* Sort each array and print statistics */
+    /* (Implement a simple insertion sort for each array) */
+    Serial.println("Benchmark complete. Process the arrays for statistics.");
+}
+```
+
+Collect the raw numbers over serial and analyze them in a spreadsheet or Python script for proper percentile calculations.
+
+## MQTT Topic Hierarchy Design
+
+<InArticleAd />
+
+
+A well-designed topic hierarchy makes your IoT system scalable, queryable, and maintainable. The general pattern follows a location-to-sensor path:
+
+```
+site / building / floor / room / device / measurement
+```
+
+### Concrete Examples
+
+```text title="Topic Hierarchy Examples"
+# Single office building
+office/hq/3/server-room/esp32-01/temperature
+office/hq/3/server-room/esp32-01/humidity
+office/hq/3/server-room/esp32-01/pressure
+office/hq/3/lobby/esp32-02/occupancy
+
+# Agricultural deployment
+farm/greenhouse-a/zone1/soil-node-01/moisture
+farm/greenhouse-a/zone1/soil-node-01/temperature
+farm/greenhouse-a/zone2/soil-node-02/moisture
+farm/outdoor/weather-station/wind_speed
+
+# Industrial floor
+factory/plant-1/line-3/motor-07/vibration
+factory/plant-1/line-3/motor-07/temperature
+factory/plant-1/line-3/plc-01/cycle_count
+```
+
+### Design Principles
+
+<Steps>
+1. **Start general, end specific.** The leftmost segments are the broadest categories (site, building). The rightmost segment is the measurement type. This lets you subscribe to `office/hq/#` to get everything in a building, or `+/+/+/+/+/temperature` to get all temperature readings across all sites.
+
+2. **Use lowercase and hyphens.** Topics are case-sensitive in MQTT. Stick to lowercase with hyphens for consistency: `server-room` not `ServerRoom` or `server_room`.
+
+3. **Keep segments meaningful.** Each level should answer a question: Where? (site, building, floor, room) What? (device) Which measurement? (sensor type). Do not add empty or redundant levels.
+
+4. **Avoid leading or trailing slashes.** The topic `/site/building/sensor` creates an empty first level. Use `site/building/sensor` instead.
+
+5. **Reserve system topics.** Use a prefix like `$SYS/` or `cmd/` for control messages. For example, `cmd/esp32-01/config` for configuration updates and `status/esp32-01/online` for health monitoring.
+
+6. **Plan for wildcards.** Think about how subscribers will query data. If a dashboard needs all sensors in a room, the hierarchy should group by room. If analytics needs all temperature readings, the hierarchy should end with the measurement type.
+</Steps>
+
+## JSON Payload Design
+
+<InArticleAd />
+
+
+A consistent JSON payload structure across all your devices makes backend processing straightforward. Here is a recommended schema:
+
+```json title="Standard Sensor Payload"
+{
+    "device_id": "esp32-proto-bench",
+    "timestamp_ms": 1741612800000,
+    "temperature_c": 23.45,
+    "humidity_pct": 48.12,
+    "pressure_hpa": 1013.25
+}
+```
+
+### Field Descriptions
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `device_id` | string | Unique identifier for the device. Use the same ID across MQTT client ID, database tags, and API keys. |
+| `timestamp_ms` | integer | Milliseconds since the device booted (or Unix epoch if the device has NTP). The server should add its own receive timestamp for authoritative timing. |
+| `temperature_c` | float | Temperature in Celsius. Always include the unit in the field name. |
+| `humidity_pct` | float | Relative humidity as a percentage (0 to 100). |
+| `pressure_hpa` | float | Barometric pressure in hectopascals. |
+
+### Extended Payload with Metadata
+
+For production systems, include diagnostic fields:
+
+```json title="Extended Payload with Diagnostics"
+{
+    "device_id": "esp32-proto-bench",
+    "firmware_version": "1.2.0",
+    "timestamp_ms": 1741612800000,
+    "uptime_s": 86400,
+    "wifi_rssi": -62,
+    "free_heap": 124000,
+    "temperature_c": 23.45,
+    "humidity_pct": 48.12,
+    "pressure_hpa": 1013.25
+}
+```
+
+The `wifi_rssi` field helps you detect connectivity degradation before messages start failing. The `free_heap` field catches memory leaks in long-running firmware. The `firmware_version` field lets your backend handle schema differences across firmware updates.
+
+## SiliconWit.io: Connected Operations Platform
+
+<InArticleAd />
+
+
+[SiliconWit.io](https://siliconwit.io) is a connected operations platform that provides real-time monitoring, dashboards, alerts (email, SMS, Discord, Slack, Telegram), remote device control, automation rules, AI analytics, and a REST API. It accepts data over all three protocols covered in this lesson: MQTT, CoAP, and HTTP. This makes it a convenient target for protocol comparison benchmarks and a practical option for production deployments.
+
+### Connection Summary
+
+| Protocol | Endpoint | Port | Authentication |
+|----------|----------|------|----------------|
+| MQTT | mqtt.siliconwit.io | 8883 (TLS) | Username + password from dashboard |
+| CoAP | coap.siliconwit.io | 5684 (DTLS) | Token in Uri-Query option |
+| HTTP | api.siliconwit.io | 443 (TLS) | API key in Authorization header |
+
+Connection details, certificates, and API keys are available after registration at [siliconwit.io](https://siliconwit.io) (Dashboard -> Devices). The free tier supports 3 devices with 7-day data retention, which is sufficient for all lessons in this course.
+
+### Why Multiple Protocols Matter
+
+A real IoT deployment often has mixed device types. Your ESP32 with Wi-Fi might use MQTT for real-time telemetry. A constrained LoRa sensor behind a gateway might forward data via CoAP. A third-party integration or mobile app might push data via HTTP REST. A platform that supports all three lets you unify data from diverse sources into a single dashboard and alert pipeline.
+
+## When to Choose Each Protocol
+
+<InArticleAd />
+
+
+<Card title="Decision Guide" icon="information">
+
+**Choose MQTT when:**
+- Devices need real-time bidirectional communication
+- You have many devices publishing to a shared broker
+- Devices are behind firewalls or NAT (outbound TCP works everywhere)
+- You need QoS guarantees, retained messages, or last will
+- The device stays powered and connected (or reconnects cheaply)
+
+**Choose CoAP when:**
+- Devices are extremely constrained (less than 64 KB RAM)
+- The network supports UDP (no restrictive firewalls)
+- You need a REST-like interface directly on the device
+- Battery life is critical and the device sleeps between transmissions
+- You need multicast discovery on a local network
+
+**Choose HTTP when:**
+- You are integrating with existing web APIs or cloud services
+- Data is sent infrequently (every few minutes or longer)
+- The device has ample resources (ESP32, Raspberry Pi, or similar)
+- You need universal firewall compatibility (ports 80/443)
+- Browser-based interaction with the device is required
+
+</Card>
+
+In practice, most IoT systems use MQTT as the primary protocol for device-to-broker communication and HTTP for backend APIs, dashboards, and third-party integrations. CoAP is less common outside of highly constrained environments (6LoWPAN, Thread networks), but understanding it helps you make informed trade-offs.
+
+## MQTT Broker Quick Setup (Mosquitto)
+
+<InArticleAd />
+
+
+To run the protocol bench, you need a local MQTT broker. Mosquitto is the standard open-source broker. Lesson 2 covers a full production setup with TLS and ACLs; here we set up a minimal instance for testing.
+
+<Tabs>
+<TabItem label="Linux (apt)">
+```bash title="Terminal"
+sudo apt update
+sudo apt install mosquitto mosquitto-clients
+
+# Allow anonymous access for testing (NOT for production)
+echo "listener 1883" | sudo tee /etc/mosquitto/conf.d/local.conf
+echo "allow_anonymous true" | sudo tee -a /etc/mosquitto/conf.d/local.conf
+sudo systemctl restart mosquitto
+
+# Verify: subscribe in one terminal
+mosquitto_sub -t "test/#" -v
+
+# Publish in another terminal
+mosquitto_pub -t "test/hello" -m "world"
+```
+</TabItem>
+<TabItem label="macOS (Homebrew)">
+```bash title="Terminal"
+brew install mosquitto
+
+# Start Mosquitto with default config
+mosquitto -c /opt/homebrew/etc/mosquitto/mosquitto.conf -v
+
+# Or run in background
+brew services start mosquitto
+
+# Test
+mosquitto_sub -t "test/#" -v
+mosquitto_pub -t "test/hello" -m "world"
+```
+</TabItem>
+<TabItem label="Windows">
+```powershell title="PowerShell"
+# Download installer from https://mosquitto.org/download/
+# Run the installer and add Mosquitto to PATH
+
+# Edit mosquitto.conf (in the install directory):
+# listener 1883
+# allow_anonymous true
+
+# Start Mosquitto
+mosquitto -c "C:\Program Files\mosquitto\mosquitto.conf" -v
+
+# Test in separate terminals
+mosquitto_sub -t "test/#" -v
+mosquitto_pub -t "test/hello" -m "world"
+```
+</TabItem>
+<TabItem label="Docker">
+```bash title="Terminal"
+docker run -d --name mosquitto \
+  -p 1883:1883 \
+  -p 9001:9001 \
+  eclipse-mosquitto:2 \
+  mosquitto -c /mosquitto-no-auth.conf
+
+# Test
+mosquitto_sub -h localhost -t "test/#" -v
+mosquitto_pub -h localhost -t "test/hello" -m "world"
+```
+</TabItem>
+</Tabs>
+
+## Running the Full Protocol Bench
+
+<InArticleAd />
+
+
+<Steps>
+1. **Start the three servers on your development machine.** Open three terminal windows:
+
+   Terminal 1 (MQTT broker):
+   ```bash
+   mosquitto -v
+   ```
+
+   Terminal 2 (CoAP server):
+   ```bash
+   python coap_server.py
+   ```
+
+   Terminal 3 (HTTP server):
+   ```bash
+   python http_server.py
+   ```
+
+2. **Update the IP addresses in `protocol_bench.ino`.** Replace `192.168.1.100` with your development machine's actual IP address on the same Wi-Fi network. Find it with `ip addr` (Linux), `ifconfig` (macOS), or `ipconfig` (Windows).
+
+3. **Flash the combined firmware to the ESP32:**
+   ```bash
+   # Using Arduino CLI
+   arduino-cli compile --fqbn esp32:esp32:esp32 protocol_bench
+   arduino-cli upload --fqbn esp32:esp32:esp32 -p /dev/ttyUSB0 protocol_bench
+   ```
+   Or use the Arduino IDE Upload button.
+
+4. **Open the serial monitor at 115200 baud.** Watch for the comparison table printed every 15 seconds.
+
+5. **Observe the server terminals.** You should see messages arriving at all three servers within the same 15-second cycle.
+
+6. **Collect at least 20 cycles** (5 minutes) for meaningful averages. Copy the serial output for analysis.
+
+7. **Optional: add TLS to MQTT.** Change the MQTT connection to use `mqtt.siliconwit.io:8883` with `WiFiClientSecure` and compare the TLS MQTT latency against plain MQTT. TLS adds latency only on the first connection; subsequent publishes on the same connection have minimal overhead.
+</Steps>
+
+### Typical Results Summary
+
+After running 100 iterations on a local network (ESP32 on the same Wi-Fi as the servers), you should see results similar to these:
+
+| Metric | MQTT (QoS 0) | CoAP (CON) | HTTP POST |
+|--------|--------------|------------|-----------|
+| Payload size | 128 bytes | 128 bytes | 128 bytes |
+| Wire overhead | ~35 bytes | ~29 bytes | ~350 bytes |
+| Mean RTT | 1.5 ms | 3.0 ms | 25 ms |
+| P95 RTT | 4 ms | 8 ms | 45 ms |
+| Connection setup | 0 ms (reused) | 0 ms (UDP) | 5-10 ms (TCP) |
+| TLS addition | 0 ms (done once) | Per session | Per request |
+
+Your numbers will differ based on network conditions, server load, and ESP32 variant, but the relative relationships are consistent across environments.
+
+## Exercises
+
+<InArticleAd />
+
+
+1. **Add MQTT QoS 1 to the benchmark.** Modify the MQTT bench function to publish with QoS 1 (`mqttClient.publish(topic, payload, true)` for retained, or set QoS in PubSubClient). QoS 1 requires a PUBACK from the broker before the publish is considered complete. Measure how the RTT changes compared to QoS 0. Then try QoS 2 (exactly once) if your client library supports it. Document the latency increase at each QoS level and explain why.
+
+2. **Implement CoAP Observe.** Instead of repeatedly sending POST requests, modify the CoAP implementation to support the Observe option (option number 6). Register an observer from a Python client using `aiocoap-client observe coap://[esp32-ip]:5683/sensor/bme280`, and have the ESP32 act as a CoAP server that pushes new readings to all registered observers whenever the sensor data changes by more than 0.5 degrees. Compare the bandwidth usage of observe-based push versus repeated POST requests over a 10-minute window.
+
+3. **Measure actual power consumption.** Connect a current sense resistor (0.1 ohm) in series with the ESP32's power supply and use an oscilloscope or a dedicated power analyzer (like the Nordic PPK2 or an INA219 breakout) to measure the current draw during each protocol's send cycle. Record the current profile for: (a) MQTT publish on an existing connection, (b) CoAP POST with ACK, (c) HTTP POST with full TCP handshake. Calculate the energy per message in microjoules and project battery life for a 1000 mAh battery at one message per minute for each protocol.
+
+4. **Build a protocol auto-selector.** Write firmware that starts with MQTT as the default protocol. If the MQTT broker is unreachable (three consecutive connection failures), fall back to HTTP POST. If HTTP also fails, buffer readings locally in SPIFFS and retry both protocols every 60 seconds. When MQTT reconnects, replay the buffered readings in order. Log every protocol switch to the serial monitor with the reason and timestamp. This pattern is common in production IoT systems that need to survive infrastructure outages.
+
+## Summary
+
+<InArticleAd />
+
+
+You examined four IoT network architectures (star, mesh, gateway, edge/fog) and learned when each one fits. You studied the three dominant IoT protocols, MQTT, CoAP, and HTTP, understanding their transport layers, overhead, and trade-offs. You implemented all three protocols on the same ESP32 with the same BME280 sensor and built a combined benchmark that measures payload size, wire overhead, and round-trip time side by side. The results confirmed that MQTT offers the best balance of low latency and reliability for connected devices, CoAP provides the lowest overhead for constrained devices and lossy networks, and HTTP is best reserved for infrequent uploads and web API integration. You designed MQTT topic hierarchies following the site/building/floor/room/device/sensor pattern and structured JSON payloads with consistent field naming. You set up a local Mosquitto broker and two Python servers (CoAP and HTTP) for testing, and learned how SiliconWit.io supports all three protocols as a managed alternative.
+
+<IoTSystemsComments />
+
+
+
+<InArticleAd />
+<TawkWidget />
+<Copyright />
