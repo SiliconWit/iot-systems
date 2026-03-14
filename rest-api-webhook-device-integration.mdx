@@ -49,6 +49,25 @@ Before writing any code, it is worth understanding when each protocol is the rig
   </Card>
 </CardGrid>
 
+```text
+  REST + MQTT Unified Pipeline
+  ──────────────────────────────────────────
+  ESP32 ──MQTT──► Mosquitto ──► Telegraf
+                   Broker         │
+                                  ▼
+  Admin ──REST──► Flask API ◄── InfluxDB
+  (browser)       │                │
+                  │                ▼
+                  │            Grafana
+                  │           (queries DB)
+                  │
+                  └──► Device registry
+                       (SQLite/Postgres)
+
+  MQTT: real-time sensor data flow
+  REST: on-demand queries and management
+```
+
 In a typical production IoT system, both protocols coexist:
 
 | Data Flow | Protocol | Example |
@@ -58,6 +77,29 @@ In a typical production IoT system, both protocols coexist:
 | Dashboard queries database | REST (GET) | Grafana or custom UI fetches last 24h of data |
 | Admin registers new device | REST (POST) | Web portal sends device metadata to API |
 | Admin updates device config | REST (PUT) | Change sampling interval from 30s to 10s |
+
+```text
+  REST API Request/Response Flow
+  ──────────────────────────────────────────
+  Client (browser/curl)     Flask Server
+  ────────────────────      ────────────
+  GET /api/v1/devices
+       │
+       ├──────────────────────► Query DB
+       │                        │
+       │  200 OK                │
+       │  [{"id":"esp32-01",   ◄┘
+       │    "last_seen":"..."}]
+       ▼
+  POST /api/v1/devices/esp32-01/config
+       {"interval": 10}
+       │
+       ├──────────────────────► Validate
+       │                        Publish MQTT cmd
+       │  200 OK               ◄┘
+       │  {"status":"updated"}
+       ▼
+```
 | Platform notifies external service | Webhook (POST) | Alert fires, platform POSTs to your endpoint |
 
 The lesson builds each piece of this architecture.

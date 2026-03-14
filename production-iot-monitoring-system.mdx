@@ -25,7 +25,45 @@ import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/sta
 
 import IoTSystemsComments from '../../../../components/iot-systems/IoTSystemsComments.astro';
 
-Seven lessons taught you the individual skills: protocol selection, broker configuration, multi-MCU MQTT clients, time-series dashboards, REST APIs, alert automation, and device security. This capstone pulls all of them together into a single production deployment. You will build a greenhouse monitoring system with three sensor nodes, a TLS-secured broker, a time-series pipeline, live dashboards, automated alerts, a REST API for device management, and cloud forwarding to SiliconWit.io. When you finish, you will have a system that runs unattended, recovers from failures, and gives you visibility from anywhere in the world. #IoT #Production #Capstone
+```text
+  Production System Health Monitoring
+  ──────────────────────────────────────────
+  Normal Operation:
+  Node 1: ✓ online   25.3C   62% RH
+  Node 2: ✓ online   24.8C   58% RH
+  Node 3: ✓ online   26.1C   AQI 42
+
+  Failure Detection:
+  Node 2: ✗ offline  (no msg in 5 min)
+    │
+    ├──► Grafana: panel turns RED
+    ├──► Node-RED: status alert fires
+    ├──► Slack: "Node 2 offline at 03:12"
+    └──► Escalation: SMS after 15 min
+```
+
+Seven lessons taught you the individual skills: protocol selection, broker configuration, multi-MCU MQTT clients, time-series dashboards, REST APIs, alert automation, and device security. This capstone pulls all of them together into a single production deployment. ```text
+  Docker Compose Service Map
+  ──────────────────────────────────────────
+  docker-compose.yml
+  ┌─────────────────────────────────────┐
+  │ mosquitto    :1883, :8883 (TLS)     │
+  │ telegraf     (internal, no port)    │
+  │ influxdb     :8086                  │
+  │ grafana      :3000                  │
+  │ nodered      :1880                  │
+  │ flask-api    :5000                  │
+  └─────────────────────────────────────┘
+         │
+  Shared Docker network: iot-net
+  Services reference each other by name:
+    telegraf ──► mosquitto (mqtt://mosquitto)
+    telegraf ──► influxdb (http://influxdb)
+    grafana  ──► influxdb (http://influxdb)
+    nodered  ──► mosquitto (mqtt://mosquitto)
+```
+
+You will build a greenhouse monitoring system with three sensor nodes, a TLS-secured broker, a time-series pipeline, live dashboards, automated alerts, a REST API for device management, and cloud forwarding to SiliconWit.io. When you finish, you will have a system that runs unattended, recovers from failures, and gives you visibility from anywhere in the world. #IoT #Production #Capstone
 
 ## System Overview
 
@@ -124,7 +162,7 @@ greenhouse/pico-node/status           "online"      (retained, last will: "offli
 greenhouse/stm32-node/air_quality     "127"         (AQI 0-500, QoS 1, retained)
 greenhouse/stm32-node/status          "online"      (retained, last will: "offline")
 
-greenhouse/cmd/<node-id>              (commands from API, e.g. {"interval": 60})
+greenhouse/cmd/[node-id]              (commands from API)
 ```
 
 **Design decisions:**

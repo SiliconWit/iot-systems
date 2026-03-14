@@ -25,6 +25,21 @@ import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/sta
 
 import IoTSystemsComments from '../../../../components/iot-systems/IoTSystemsComments.astro';
 
+```text
+  Protocol Comparison at a Glance
+  ──────────────────────────────────────────
+            MQTT       CoAP       HTTP
+  ────────  ─────      ─────      ─────
+  Transport TCP        UDP        TCP
+  Overhead  2 bytes    4 bytes    ~200 bytes
+            (min hdr)  (min hdr)  (headers)
+  Model     Pub/Sub    Req/Resp   Req/Resp
+  QoS       0, 1, 2    CON/NON    N/A
+  Power     Low        Lowest     High
+  Best for  Streaming  Constrained On-demand
+            telemetry  networks    queries
+```
+
 Choosing the right communication protocol is the first real engineering decision in any IoT project. MQTT, CoAP, and HTTP all move sensor data from device to server, but they differ dramatically in bandwidth, latency, power consumption, and reliability. In this lesson you will implement all three protocols on the same ESP32 with the same BME280 sensor, measure the differences with real numbers, and walk away with a clear mental model for when to use each one. #IoT #MQTT #Protocols
 
 ## What We Are Building
@@ -52,6 +67,27 @@ A single ESP32 reads temperature, humidity, and pressure from a BME280 sensor, t
 | U1 | ESP32 DevKitC | 1 | Reuse from [ESP32 course](/education/embedded-programming-esp32/) |
 | U2 | BME280 breakout module | 1 | I2C, 3.3V compatible |
 | | Breadboard + jumper wires | 1 set | |
+
+```text
+  IoT System Architecture: 3-Tier Model
+  ──────────────────────────────────────────
+  DEVICE TIER           GATEWAY TIER     CLOUD TIER
+  ───────────           ────────────     ──────────
+  ┌─────────┐           ┌──────────┐    ┌────────┐
+  │ ESP32   ├──MQTT────►│          │    │        │
+  │ BME280  │           │  RPi /   ├───►│ Cloud  │
+  └─────────┘           │  Server  │    │ DB +   │
+  ┌─────────┐           │          │    │ Dash-  │
+  │ Pico W  ├──MQTT────►│ Broker + │    │ board  │
+  │ Sensor  │           │ DB +     │    │        │
+  └─────────┘           │ Rules    │    └────────┘
+  ┌─────────┐           └──────────┘
+  │ STM32 + ├──MQTT────►
+  │ ESP-01  │
+  └─────────┘
+  Low power,            Aggregation,     Storage,
+  local sensing         local storage    analytics
+```
 
 ## IoT System Architectures
 

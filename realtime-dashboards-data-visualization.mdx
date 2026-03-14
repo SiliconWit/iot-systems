@@ -42,6 +42,27 @@ The pipeline has four stages, each handled by a dedicated tool:
 | 3. Time-Series Database | InfluxDB 2.x | Stores measurements with timestamps, tags, and fields; handles retention and downsampling |
 | 4. Visualization | Grafana | Queries InfluxDB and renders interactive dashboards with panels, thresholds, and alerts |
 
+```text
+  TIG Stack Data Flow
+  ──────────────────────────────────────────
+  Sensor ──► Mosquitto ──► Telegraf ──► InfluxDB
+  (MQTT       (broker)    (MQTT sub     (time-
+   publish)               + parser)     series DB)
+                                           │
+                                           │ Flux
+                                           │ query
+                                           ▼
+                                        Grafana
+                                        (panels:
+                                         line chart,
+                                         gauge,
+                                         table,
+                                         alerts)
+
+  Each component is independent. If Grafana
+  goes down, data keeps flowing into InfluxDB.
+```
+
 Data flows in one direction: sensor publishes to Mosquitto, Telegraf consumes the message, writes it to InfluxDB, and Grafana queries InfluxDB on a refresh interval (typically every 5 seconds). Each component is independent. If Grafana goes down, data keeps flowing into InfluxDB. If Telegraf restarts, it reconnects to the broker and resumes ingestion.
 
 ## Installing the TIG Stack
@@ -50,6 +71,24 @@ Data flows in one direction: sensor publishes to Mosquitto, Telegraf consumes th
 
 
 You can install all four components (Mosquitto + Telegraf + InfluxDB + Grafana) either through system packages or through Docker Compose. Docker is the recommended approach because it isolates each service, makes upgrades trivial, and produces the same environment on any Linux distribution.
+
+```text
+  Grafana Dashboard Panel Layout
+  ──────────────────────────────────────────
+  ┌──────────────────────────────────────┐
+  │ Temperature (Line Chart)             │
+  │  30C ─────────╱╲──────────           │
+  │  25C ────────╱──╲─────────           │
+  │  20C ───────╱────╲────────           │
+  │       0h    6h   12h   18h   24h     │
+  ├──────────────┬───────────────────────┤
+  │  Humidity    │  Pressure  │ Status   │
+  │  ┌─────┐    │  1013 hPa  │ Node 1 ✓│
+  │  │ 65% │    │  ┌──────┐  │ Node 2 ✓│
+  │  │gauge│    │  │ stat  │  │ Node 3 ✗│
+  │  └─────┘    │  └──────┘  │          │
+  └──────────────┴───────────┴──────────┘
+```
 
 :::tip[Podman works too]
 [Podman](https://podman.io) is fully open source (Apache 2.0, no paid tiers), runs rootless by default, and needs no background daemon. Most Compose files in this lesson work with `podman-compose`, though you may need minor adjustments for inter-container networking. Test with `podman-compose up` before relying on it in production.

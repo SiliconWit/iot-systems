@@ -52,9 +52,50 @@ A self-hosted MQTT broker on a Raspberry Pi or Linux machine with password authe
 <InArticleAd />
 
 
+```text
+  TLS Handshake (Mosquitto + ESP32)
+  ──────────────────────────────────────────
+  ESP32 Client            Mosquitto Broker
+  ────────────            ────────────────
+       │  ClientHello          │
+       ├──────────────────────►│
+       │                       │
+       │  ServerHello +        │
+       │  Server Certificate   │
+       │◄──────────────────────┤
+       │                       │
+       │  Verify cert against  │
+       │  embedded CA cert     │
+       │                       │
+       │  Key Exchange         │
+       ├──────────────────────►│
+       │                       │
+       │  Encrypted MQTT       │
+       │◄─────────────────────►│
+       │  CONNECT / CONNACK    │
+```
+
 Before touching any configuration files, make sure the core MQTT concepts are solid. Everything in this lesson (authentication, ACLs, TLS, bridging) builds on these fundamentals.
 
 ### The Publish/Subscribe Model
+
+```text
+  MQTT Publish/Subscribe Topology
+  ──────────────────────────────────────────
+  Publishers              Subscribers
+  ──────────   ┌────────┐ ───────────
+  ESP32 ──pub──►│        │──sub──► Grafana
+  (temp data)  │ MQTT   │
+               │ Broker │──sub──► Alert Engine
+  Pico W ──pub─►│        │
+  (humidity)   │(Mosqu- │──sub──► Mobile App
+               │ itto)  │
+  STM32 ──pub──►│        │──sub──► Data Logger
+  (air qual)   └────────┘
+
+  Devices never talk directly to each other.
+  The broker routes messages by topic match.
+```
 
 MQTT uses a broker as the central message router. Devices never communicate directly. A **publisher** sends a message to a **topic** on the broker. A **subscriber** registers interest in one or more topics. The broker delivers each published message to every client whose subscription matches the topic.
 

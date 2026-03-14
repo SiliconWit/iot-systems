@@ -49,6 +49,29 @@ IoT devices face a unique set of risks that traditional servers and workstations
   </Card>
 </CardGrid>
 
+```text
+  X.509 Certificate Chain
+  ──────────────────────────────────────────
+  Root CA (self-signed, kept offline)
+    │
+    │ signs
+    ▼
+  Server Certificate (on Mosquitto broker)
+    │  CN = mqtt.example.com
+    │  Used for TLS server identity
+    │
+    │ signs (for mutual TLS)
+    ▼
+  Device Certificate (in ESP32 flash)
+    │  CN = device-001
+    │  Proves device identity to broker
+    │
+    ▼
+  Broker verifies device cert against CA
+  Device verifies server cert against CA
+  = Mutual TLS (both sides authenticated)
+```
+
 ### Why Attackers Target IoT
 
 The goal is not always the device itself. Compromised IoT devices serve as:
@@ -57,6 +80,29 @@ The goal is not always the device itself. Compromised IoT devices serve as:
 - **Network pivot points:** A compromised sensor on a corporate network gives an attacker a foothold to move laterally toward more valuable targets.
 - **Data exfiltration sources:** Sensor data can reveal manufacturing schedules, occupancy patterns, or environmental conditions that have business intelligence value.
 - **Ransomware targets:** Locking a building management system or industrial controller until a ransom is paid is increasingly common.
+
+```text
+  Device Provisioning Workflow
+  ──────────────────────────────────────────
+  Factory                     Field
+  ───────                     ─────
+  1. Generate unique          5. Power on
+     device keypair              │
+       │                      6. Connect to
+  2. Sign device cert            provisioning
+     with CA key                 server (TLS)
+       │                         │
+  3. Flash to ESP32           7. Server verifies
+     - CA cert                   device cert
+     - Device cert               │
+     - Device key             8. Server sends
+       │                        config + MQTT
+  4. Ship device                 credentials
+                                 │
+                              9. Device connects
+                                 to production
+                                 MQTT broker
+```
 
 ## OWASP IoT Top 10
 

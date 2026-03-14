@@ -25,6 +25,29 @@ import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/sta
 
 import IoTSystemsComments from '../../../../components/iot-systems/IoTSystemsComments.astro';
 
+```text
+  MQTT Topic Hierarchy Design
+  ──────────────────────────────────────────
+  site/
+  └── building_a/
+      ├── esp32/
+      │   └── sensor_01/
+      │       ├── temperature    ◄── 23.5
+      │       ├── humidity       ◄── 65.2
+      │       └── status         ◄── online
+      ├── pico/
+      │   └── sensor_02/
+      │       ├── temperature
+      │       └── humidity
+      └── stm32/
+          └── sensor_03/
+              ├── temperature
+              └── air_quality
+
+  Subscribe: site/building_a/+/+/temperature
+  Gets temperature from ALL devices.
+```
+
 A broker sitting idle is not very useful. The real work begins when embedded devices connect, authenticate, publish sensor data on well-structured topics, and recover gracefully from disconnections. In this lesson you will write MQTT client firmware for three different MCU platforms (ESP32, RPi Pico W, and STM32 with an ESP-01 Wi-Fi module), all publishing to the same Mosquitto broker you configured in Lesson 2. By the end, you will have a three-node sensor network with a consistent topic hierarchy, structured JSON payloads, and robust reconnection logic. #MQTT #ESP32 #MultiPlatform
 
 ## What We Are Building
@@ -58,6 +81,26 @@ Three microcontroller nodes, each reading a BME280 temperature/humidity sensor a
 | U4 | ESP-01 module | 1 | Wi-Fi for STM32 via UART AT commands |
 | S1-S3 | BME280 breakout | 3 | One per MCU (or move one between tests) |
 | | Breadboard + jumper wires | 1 set | |
+
+```text
+  Reconnection with Exponential Backoff
+  ──────────────────────────────────────────
+  Connect attempt 1: wait 1s
+  Connect attempt 2: wait 2s
+  Connect attempt 3: wait 4s
+  Connect attempt 4: wait 8s  + jitter
+  Connect attempt 5: wait 16s + jitter
+  Connect attempt 6: wait 32s + jitter
+  Connect attempt 7: wait 60s (max cap)
+
+  ┌──────┐ fail ┌──────┐ fail ┌──────┐
+  │ Try  ├─────►│ Wait ├─────►│ Try  │...
+  │  1   │      │ 1s   │      │  2   │
+  └──────┘      └──────┘      └──────┘
+
+  Jitter: add random 0 to 1s to prevent
+  all devices reconnecting simultaneously.
+```
 
 ## Topic Hierarchy Design
 

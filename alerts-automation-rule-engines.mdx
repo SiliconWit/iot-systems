@@ -31,6 +31,25 @@ A dashboard full of charts is useless if nobody is watching it at 3 AM when a fr
 
 Data without alerts is just noise. Consider a greenhouse with temperature and humidity sensors publishing to your MQTT broker every 10 seconds. The Grafana dashboard from Lesson 4 shows beautiful charts, but those charts only help if someone is actively looking at them. The moment you walk away from the screen, your monitoring system is blind.
 
+```text
+  Node-RED Alert Flow
+  ──────────────────────────────────────────
+  ┌──────────┐   ┌──────────┐   ┌─────────┐
+  │ MQTT In  │──►│ Function │──►│ Switch  │
+  │ (sensor/ │   │ (parse   │   │ (temp   │
+  │  temp)   │   │  JSON)   │   │  > 35?) │
+  └──────────┘   └──────────┘   └────┬────┘
+                                     │
+                          ┌──────────┼──────────┐
+                          ▼          ▼          ▼
+                     ┌────────┐ ┌────────┐ ┌───────┐
+                     │ Slack  │ │ Email  │ │ MQTT  │
+                     │ notify │ │ alert  │ │ Out   │
+                     └────────┘ └────────┘ │(actua-│
+                                           │ tor)  │
+                                           └───────┘
+```
+
 An alert system closes that gap. It continuously evaluates incoming data against a set of rules and takes action when a condition is met: send a message, trigger an actuator, log an incident, or escalate to a second person if the first does not acknowledge within a time window.
 
 **What a good alerting system provides:**
@@ -43,6 +62,31 @@ An alert system closes that gap. It continuously evaluates incoming data against
 | Escalation | Notifies a backup person if the primary does not respond |
 | Active hours | Suppresses non-critical alerts during off-hours |
 | Audit trail | Logs every alert for post-incident review |
+
+```text
+  Alert Evaluation Flow
+  ──────────────────────────────────────────
+  MQTT message arrives
+       │
+       ▼
+  Parse JSON payload (temp, humidity, ts)
+       │
+       ▼
+  ┌──────────────┐
+  │ temp > 35C?  │──YES──► Fire threshold alert
+  └──────┬───────┘         │
+         │ NO              ├──► Slack message
+         ▼                 ├──► Email
+  ┌──────────────┐         └──► Log to DB
+  │ In cooldown? │
+  └──────┬───────┘
+         │ NO
+         ▼
+  ┌──────────────┐
+  │ Last msg     │
+  │ > 5 min ago? │──YES──► Fire status alert
+  └──────────────┘         "Device offline"
+```
 
 ## Alert Types
 
