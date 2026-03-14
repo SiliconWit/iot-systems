@@ -12,6 +12,8 @@ sidebar:
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Contributors Welcome](https://img.shields.io/badge/contributors-welcome-orange)
 
+**Read this course at:** [https://siliconwit.com/education/iot-systems/](https://siliconwit.com/education/iot-systems/)
+
 A hands-on course covering IoT architecture from protocol selection through production monitoring. You will build secure MQTT pipelines, real-time dashboards, and a complete edge-to-cloud system.
 
 ## Lessons
