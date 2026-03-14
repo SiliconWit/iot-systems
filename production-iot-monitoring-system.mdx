@@ -691,7 +691,7 @@ main()
 
 ### STM32 Node (Air Quality via ESP-01)
 
-The STM32 reads an MQ-135 air quality sensor on its ADC and sends MQTT publishes through an ESP-01 module connected over UART. This uses AT commands to control the ESP-01 (the same pattern from the STM32 course). The firmware is written for STM32 HAL.
+The STM32 reads an MQ-135 air quality sensor on its ADC and sends MQTT publishes through an ESP-01 module connected over UART. This uses AT commands to control the ESP-01 (the same pattern from the [STM32 course](/education/embedded-programming-stm32/)). The firmware is written for STM32 HAL.
 
 ```c title="stm32_node/Core/Src/main.c (key sections)"
 /* ── Includes and defines ── */
@@ -1763,11 +1763,11 @@ This is not a demo. This is the pattern that real IoT deployments follow, whethe
 
 
 <Card title="Exercise 1: Add OTA Firmware Updates" icon="pencil">
-Add over-the-air firmware update capability to the ESP32 node. The node should check a firmware HTTP server on each boot (or at a configurable interval) for a newer firmware version. If a new version is available, it should download, verify the SHA-256 hash, and apply the update. Use the ESP-IDF OTA library from the ESP32 course (Lesson 7: OTA Updates and Secure Boot). Test by deploying a firmware update that changes the publish interval from 30 seconds to 15 seconds, and verify the change takes effect after the OTA completes.
+Add over-the-air firmware update capability to the ESP32 node. The node should check a firmware HTTP server on each boot (or at a configurable interval) for a newer firmware version. If a new version is available, it should download, verify the SHA-256 hash, and apply the update. Use the ESP-IDF OTA library from the [ESP32 course](/education/embedded-programming-esp32/) (Lesson 7: OTA Updates and Secure Boot). Test by deploying a firmware update that changes the publish interval from 30 seconds to 15 seconds, and verify the change takes effect after the OTA completes.
 </Card>
 
 <Card title="Exercise 2: Add an Edge Gateway with Embedded Linux" icon="pencil">
-Deploy a Raspberry Pi running a custom Yocto or Buildroot image (from Embedded Linux Lesson 9) as an edge gateway between the sensor nodes and the cloud. The edge gateway should run a local Mosquitto instance that the sensor nodes publish to over the LAN, perform local data aggregation (compute 5-minute averages), forward aggregated data to SiliconWit.io (reducing cloud bandwidth), cache raw data locally in SQLite for 7 days, and continue operating even when the internet is down. This exercise combines the Embedded Linux course's custom image building with the IoT Systems course's broker bridging.
+Deploy a Raspberry Pi running a custom Yocto or Buildroot image (from [Embedded Linux](/education/embedded-linux-rpi/) Lesson 9) as an edge gateway between the sensor nodes and the cloud. The edge gateway should run a local Mosquitto instance that the sensor nodes publish to over the LAN, perform local data aggregation (compute 5-minute averages), forward aggregated data to SiliconWit.io (reducing cloud bandwidth), cache raw data locally in SQLite for 7 days, and continue operating even when the internet is down. This exercise combines the [Embedded Linux course's](/education/embedded-linux-rpi/) custom image building with the IoT Systems course's broker bridging.
 </Card>
 
 <Card title="Exercise 3: Multi-Channel Alert Escalation" icon="pencil">

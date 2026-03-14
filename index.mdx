@@ -15,7 +15,7 @@ A sensor that only logs to serial is not an IoT device. IoT means the data reach
 
 ## Why a Dedicated IoT Course?
 
-The embedded courses touched networking (ESP32 Wi-Fi, RPi Pico W, Embedded Linux MQTT bridge), but always as a side topic. Building a reliable, secure, production-grade IoT system requires its own set of skills:
+The embedded courses touched networking ([ESP32](/education/embedded-programming-esp32/) Wi-Fi, [RPi Pico W](/education/embedded-programming-rpi-pico/), [Embedded Linux](/education/embedded-linux-rpi/) MQTT bridge), but always as a side topic. Building a reliable, secure, production-grade IoT system requires its own set of skills:
 
 <CardGrid>
   <Card title="Protocol Fluency" icon="star">
@@ -106,12 +106,12 @@ Each lesson follows a consistent cycle:
 
 | Part | Quantity | First Used | Notes |
 |------|----------|------------|-------|
-| ESP32 dev board | 1 | Lesson 1 | Reuse from ESP32 course |
-| RPi Pico W | 1 | Lesson 3 | Reuse from RPi Pico course |
-| STM32 + ESP-01 (or STM32 with Wi-Fi) | 1 | Lesson 3 | Reuse from STM32 course |
+| ESP32 dev board | 1 | Lesson 1 | Reuse from [ESP32 course](/education/embedded-programming-esp32/) |
+| RPi Pico W | 1 | Lesson 3 | Reuse from [RPi Pico course](/education/embedded-programming-rpi-pico/) |
+| STM32 + ESP-01 (or STM32 with Wi-Fi) | 1 | Lesson 3 | Reuse from [STM32 course](/education/embedded-programming-stm32/) |
 | BME280 sensor module | 1 | Lesson 1 | Reuse |
 | Raspberry Pi (any model) or Linux PC | 1 | Lesson 2 | For broker and dashboard hosting |
-| USB webcam (optional) | 1 | Lesson 8 | Reuse from Embedded Linux course |
+| USB webcam (optional) | 1 | Lesson 8 | Reuse from [Embedded Linux course](/education/embedded-linux-rpi/) |
 
 **Total estimated cost: 0 USD** (if you have components from prior courses)
 
@@ -137,12 +137,12 @@ Each lesson follows a consistent cycle:
 **Helpful but not required:**
 - Python (for backend scripts and API servers)
 - Docker (for running Grafana, InfluxDB, Node-RED)
-- The Embedded Linux with RPi course (for the edge gateway context)
+- The [Embedded Linux with RPi](/education/embedded-linux-rpi/) course (for the edge gateway context)
 
 ## Getting Started
 
 <Steps>
-1. **Ensure you have an ESP32 and a BME280 sensor.** Lesson 1 uses these to compare protocols. If you completed the ESP32 course, you already have both.
+1. **Ensure you have an ESP32 and a BME280 sensor.** Lesson 1 uses these to compare protocols. If you completed the [ESP32 course](/education/embedded-programming-esp32/), you already have both.
 
 2. **Set up a Linux machine for the broker.** This can be your development PC, a Raspberry Pi, a VM, or a cloud VPS. Mosquitto, InfluxDB, and Grafana all run on any Linux distribution.
 
