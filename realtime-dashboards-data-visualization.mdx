@@ -25,7 +25,7 @@ import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/sta
 
 import IoTSystemsComments from '../../../../components/iot-systems/IoTSystemsComments.astro';
 
-Your MQTT broker is routing sensor data, and your MCU clients are publishing JSON payloads on a schedule. But data flowing through a broker is invisible unless you store it and visualize it. In this lesson you will build a complete MQTT-to-dashboard pipeline using Telegraf, InfluxDB, and Grafana (the TIG stack), then compare it with the managed dashboards on SiliconWit.io, and finally build a lightweight Chart.js alternative for resource-constrained gateways. #Dashboard #Grafana #DataViz
+Sensor data flowing through an MQTT broker vanishes the moment it is consumed. Without persistent storage, you cannot see trends, detect slow drift, or prove that a temperature spike happened last Tuesday at 3 AM. Dashboards without a time-series database behind them show only the present, and raw database queries show only numbers. You need both: a pipeline that stores every reading with a timestamp and a visualization layer that turns those readings into charts, gauges, and alerts a human can act on. In this lesson you will build that pipeline using Telegraf, InfluxDB, and Grafana (the TIG stack), compare it with the managed dashboards on SiliconWit.io, and build a lightweight Chart.js alternative for resource-constrained gateways. #Dashboard #Grafana #DataViz
 
 ## The MQTT-to-Dashboard Pipeline
 

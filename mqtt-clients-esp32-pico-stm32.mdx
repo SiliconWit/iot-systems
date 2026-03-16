@@ -25,6 +25,8 @@ import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/sta
 
 import IoTSystemsComments from '../../../../components/iot-systems/IoTSystemsComments.astro';
 
+A broker sitting idle is not very useful. The real work begins when embedded devices connect, authenticate, publish sensor data on well-structured topics, and recover gracefully from disconnections. In this lesson you will write MQTT client firmware for three different MCU platforms (ESP32, RPi Pico W, and STM32 with an ESP-01 Wi-Fi module), all publishing to the same Mosquitto broker you configured in Lesson 2. By the end, you will have a three-node sensor network with a consistent topic hierarchy, structured JSON payloads, and robust reconnection logic. #MQTT #ESP32 #MultiPlatform
+
 ```text
   MQTT Topic Hierarchy Design
   ──────────────────────────────────────────
@@ -47,8 +49,6 @@ import IoTSystemsComments from '../../../../components/iot-systems/IoTSystemsCom
   Subscribe: site/building_a/+/+/temperature
   Gets temperature from ALL devices.
 ```
-
-A broker sitting idle is not very useful. The real work begins when embedded devices connect, authenticate, publish sensor data on well-structured topics, and recover gracefully from disconnections. In this lesson you will write MQTT client firmware for three different MCU platforms (ESP32, RPi Pico W, and STM32 with an ESP-01 Wi-Fi module), all publishing to the same Mosquitto broker you configured in Lesson 2. By the end, you will have a three-node sensor network with a consistent topic hierarchy, structured JSON payloads, and robust reconnection logic. #MQTT #ESP32 #MultiPlatform
 
 ## What We Are Building
 

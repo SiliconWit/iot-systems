@@ -25,6 +25,8 @@ import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/sta
 
 import IoTSystemsComments from '../../../../components/iot-systems/IoTSystemsComments.astro';
 
+Pick the wrong protocol for a battery-powered sensor node and it drains in days instead of months. Use HTTP where MQTT would suffice and you burn 100x the bandwidth on headers alone. Use MQTT where CoAP fits better and you pay for a persistent TCP connection that a constrained device cannot afford. These are not theoretical differences: they show up in your power budget, your cellular data bill, and your network capacity. In this lesson you will implement MQTT, CoAP, and HTTP on the same ESP32 with the same BME280 sensor, measure message size, round-trip time, and power draw with real numbers, and walk away with a clear framework for when to use each protocol. #IoT #MQTT #Protocols
+
 ```text
   Protocol Comparison at a Glance
   ──────────────────────────────────────────
@@ -39,8 +41,6 @@ import IoTSystemsComments from '../../../../components/iot-systems/IoTSystemsCom
   Best for  Streaming  Constrained On-demand
             telemetry  networks    queries
 ```
-
-Choosing the right communication protocol is the first real engineering decision in any IoT project. MQTT, CoAP, and HTTP all move sensor data from device to server, but they differ dramatically in bandwidth, latency, power consumption, and reliability. In this lesson you will implement all three protocols on the same ESP32 with the same BME280 sensor, measure the differences with real numbers, and walk away with a clear mental model for when to use each one. #IoT #MQTT #Protocols
 
 ## What We Are Building
 

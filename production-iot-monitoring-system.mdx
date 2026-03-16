@@ -25,6 +25,8 @@ import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/sta
 
 import IoTSystemsComments from '../../../../components/iot-systems/IoTSystemsComments.astro';
 
+Individual subsystems that work perfectly in isolation have a habit of falling apart when combined. A broker that handles three test clients chokes when TLS, Telegraf, Node-RED, and a Flask API all compete for connections. A dashboard that looks great on synthetic data shows nothing when real sensor payloads arrive with unexpected field names. Production readiness means every component has been tested together, failures are detected automatically, and the system recovers without human intervention. This capstone pulls together protocol selection, broker configuration, multi-MCU MQTT clients, time-series storage, REST APIs, alert automation, and device security into a single greenhouse monitoring deployment with three sensor nodes, live Grafana dashboards, Slack alerts, and cloud forwarding to SiliconWit.io. #IoT #Production #Capstone
+
 ```text
   Production System Health Monitoring
   ──────────────────────────────────────────
@@ -42,7 +44,7 @@ import IoTSystemsComments from '../../../../components/iot-systems/IoTSystemsCom
     └──► Escalation: SMS after 15 min
 ```
 
-Seven lessons taught you the individual skills: protocol selection, broker configuration, multi-MCU MQTT clients, time-series dashboards, REST APIs, alert automation, and device security. This capstone pulls all of them together into a single production deployment. ```text
+```text
   Docker Compose Service Map
   ──────────────────────────────────────────
   docker-compose.yml
@@ -62,8 +64,6 @@ Seven lessons taught you the individual skills: protocol selection, broker confi
     grafana  ──► influxdb (http://influxdb)
     nodered  ──► mosquitto (mqtt://mosquitto)
 ```
-
-You will build a greenhouse monitoring system with three sensor nodes, a TLS-secured broker, a time-series pipeline, live dashboards, automated alerts, a REST API for device management, and cloud forwarding to SiliconWit.io. When you finish, you will have a system that runs unattended, recovers from failures, and gives you visibility from anywhere in the world. #IoT #Production #Capstone
 
 ## System Overview
 
