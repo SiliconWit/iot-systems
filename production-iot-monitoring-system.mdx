@@ -141,6 +141,10 @@ The system monitors a greenhouse environment using three sensor nodes, each runn
   </Card>
 </CardGrid>
 
+:::tip[Instrument it]
+Placement decides whether the readings are real. Put a capacitive soil moisture probe (not a resistive one, it corrodes) in the root zone, set back from the dripper so it reads the bed and not the last watering, and keep air temperature and humidity at canopy height in a small radiation shield, shaded from sun and clear of vents. Good, cheap parts: an SHT31 or BME280 for temperature and humidity, a BH1750 for light in lux (far better than a bare LDR), and an SCD41 if you want true CO2. An [ESP32](/education/sensor-actuator-interfacing-stm32/) reads them all over I2C, and once the node earns a small board it can do more than watch: [stream](/education/iot-systems/) to a live [dashboard](https://siliconwit.io) and close the loop, watering when the bed dries and venting when it overheats.
+:::
+
 ## MQTT Topic Hierarchy
 
 <InArticleAd />
