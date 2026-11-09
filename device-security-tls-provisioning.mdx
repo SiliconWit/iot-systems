@@ -25,91 +25,58 @@ import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/sta
 
 import IoTSystemsComments from '../../../../components/iot-systems/IoTSystemsComments.astro';
 
-An IoT device that publishes sensor data without encryption or authentication is an open invitation to anyone on the same network. In Lesson 2 we configured Mosquitto with server-side TLS and password authentication, which is a solid start, but production systems demand more: mutual TLS where the device proves its identity with a certificate, a provisioning workflow that gives each device a unique credential, and firmware signing so that only code you have authorized can run on your hardware. This lesson covers all three. #Security #TLS #IoTSecurity
+One password is copied from the memory of one stolen sensor. If every device uses that password, the thief can connect as any of them and send false readings, and you cannot tell which messages to trust. Encryption does not prevent this: it protects a message on its way and says nothing about who sent it. This lesson adds what is missing: a certificate for each device, so that the broker knows which device is speaking; a process that gives each device its own identity (provisioning); and signed firmware, so that a device runs only code you approved. #Security #TLS #IoTSecurity
 
 ## The IoT Threat Landscape
 
-IoT devices face a unique set of risks that traditional servers and workstations do not.
+An IoT device has risks that an office server does not have.
 
 <CardGrid>
   <Card title="Always On, Always Reachable" icon="warning">
-    IoT devices run 24/7, often on networks with direct internet exposure. Unlike a laptop that a user powers off at night, a temperature sensor on a factory floor is always listening. Attackers have unlimited time to probe it.
+    A laptop is switched off at night. A temperature sensor on a factory floor listens all day and all night, often on a network open to the internet, so an attacker has unlimited time to test it.
   </Card>
 
   <Card title="Rarely Updated" icon="warning">
-    Many deployed IoT devices never receive a firmware update after installation. Known vulnerabilities remain exploitable for the entire lifetime of the device, which can be 5 to 10 years for industrial equipment.
+    Many IoT devices never receive a firmware update after installation. A known fault stays open for the whole life of the device, which can be 5 to 10 years in industry.
   </Card>
 
   <Card title="Physical Access" icon="warning">
-    Devices deployed in the field (parking sensors, environmental monitors, agricultural nodes) can be physically accessed by anyone. An attacker can extract firmware, read flash memory, or attach a debugger if the hardware is not locked down.
+    Anyone can touch a device in the field (a parking sensor, a farm node). If the hardware is not locked, an attacker can copy the firmware, read the flash memory, or attach a debugger.
   </Card>
 
   <Card title="Resource Constraints" icon="warning">
-    Limited CPU, RAM, and storage mean that heavyweight security mechanisms (full IDS, antivirus, complex firewalls) are not feasible. Security must be lightweight and built into the protocol and provisioning layers.
+    A small processor with little memory cannot run antivirus software or a full firewall. Its security must be light, and built into the protocol and the provisioning.
   </Card>
 </CardGrid>
-
-```text
-  X.509 Certificate Chain
-  ──────────────────────────────────────────
-  Root CA (self-signed, kept offline)
-    │
-    │ signs
-    ▼
-  Server Certificate (on Mosquitto broker)
-    │  CN = mqtt.example.com
-    │  Used for TLS server identity
-    │
-    │ signs (for mutual TLS)
-    ▼
-  Device Certificate (in ESP32 flash)
-    │  CN = device-001
-    │  Proves device identity to broker
-    │
-    ▼
-  Broker verifies device cert against CA
-  Device verifies server cert against CA
-  = Mutual TLS (both sides authenticated)
-```
 
 ### Why Attackers Target IoT
 
 The goal is not always the device itself. Compromised IoT devices serve as:
 
 - **Botnet nodes:** The Mirai botnet in 2016 used hundreds of thousands of IoT devices (cameras, routers, DVRs) to launch DDoS attacks exceeding 1 Tbps.
-- **Network pivot points:** A compromised sensor on a corporate network gives an attacker a foothold to move laterally toward more valuable targets.
-- **Data exfiltration sources:** Sensor data can reveal manufacturing schedules, occupancy patterns, or environmental conditions that have business intelligence value.
-- **Ransomware targets:** Locking a building management system or industrial controller until a ransom is paid is increasingly common.
+- **A way into the network:** From a taken-over sensor on a company network, an attacker moves on to more valuable machines.
+- **A source of data:** Sensor data can reveal production schedules or when a building is empty.
+- **Ransom:** A building management system or an industrial controller is locked until money is paid.
 
-```text
-  Device Provisioning Workflow
-  ──────────────────────────────────────────
-  Factory                     Field
-  ───────                     ─────
-  1. Generate unique          5. Power on
-     device keypair              │
-       │                      6. Connect to
-  2. Sign device cert            provisioning
-     with CA key                 server (TLS)
-       │                         │
-  3. Flash to ESP32           7. Server verifies
-     - CA cert                   device cert
-     - Device cert               │
-     - Device key             8. Server sends
-       │                        config + MQTT
-  4. Ship device                 credentials
-                                 │
-                              9. Device connects
-                                 to production
-                                 MQTT broker
-```
+### What each measure stops, and what it does not
+
+No single measure makes a device safe. Each one closes one door.
+
+| Measure | What it stops | What it does not stop |
+|---------|---------------|-----------------------|
+| TLS on the connection | Reading or changing messages on the network | A stolen password, or a device that has been taken over |
+| Check of the broker's certificate | A false broker that collects your data | Nothing, if the firmware skips the check |
+| A certificate for each device (mutual TLS) | A connection by someone who knows only a password | Someone who copies the private key out of the device |
+| Topic rules for each device (ACL) | A stolen identity that reads or writes the topics of other devices | False data on that device's own topics |
+| Signed firmware | Firmware that you did not sign | A fault in firmware that you did sign, or theft of the signing key |
+| A separate network for devices | A taken-over device that reaches office computers | An attack through the one port that stays open |
 
 ## OWASP IoT Top 10
 
 <InArticleAd />
 
 
-The Open Web Application Security Project (OWASP) maintains a list of the ten most critical IoT security risks. Every IoT engineer should know these.
+The Open Web Application Security Project (OWASP) keeps a list of the ten most common IoT security risks.
 
 | Rank | Vulnerability | Description | Mitigation |
 |------|--------------|-------------|------------|
@@ -124,14 +91,14 @@ The Open Web Application Security Project (OWASP) maintains a list of the ten mo
 | I9 | Insecure default settings | Debug ports enabled, verbose logging, JTAG unlocked | Secure defaults in production builds, disable debug interfaces |
 | I10 | Lack of physical hardening | Exposed UART/JTAG, no tamper detection, readable flash | Disable debug interfaces, enable secure boot, use tamper-evident enclosures |
 
-We will address I1, I2, I4, I7, I8, and I9 directly in this lesson. The remaining items are covered through practices introduced across the full course series.
+This lesson deals with I1, I2, I4, I7, I8, and I9.
 
 ## TLS Fundamentals for IoT
 
 <InArticleAd />
 
 
-Transport Layer Security (TLS) provides three guarantees for network communication:
+Without protection, a message on a network is like a postcard: every hand it passes through can read it or change it. Transport Layer Security (TLS) turns the postcard into a sealed letter and checks who is at the other end. It gives three guarantees:
 
 | Property | What It Does | How It Works |
 |----------|-------------|--------------|
@@ -140,6 +107,8 @@ Transport Layer Security (TLS) provides three guarantees for network communicati
 | **Integrity** | Detects tampering with messages in transit | HMAC or AEAD tag on every record |
 
 ### TLS 1.2 vs. TLS 1.3
+
+A connection starts with a handshake, in which the two sides prove identity and agree on keys. In the table, RTT means one round trip of messages, and forward secrecy means that a key stolen later cannot open traffic that was recorded earlier.
 
 | Feature | TLS 1.2 | TLS 1.3 |
 |---------|---------|---------|
@@ -150,11 +119,11 @@ Transport Layer Security (TLS) provides three guarantees for network communicati
 | ESP32 support (ESP-IDF 5.x) | Full | Full (mbedTLS 3.x) |
 | Mosquitto support | Full | Full (OpenSSL 1.1.1+) |
 
-For constrained devices, TLS 1.3 is preferred because the 1-RTT handshake saves time and bandwidth, and the removal of legacy cipher suites means there are fewer ways to misconfigure security. However, TLS 1.2 with the right cipher suite is still acceptable.
+Prefer TLS 1.3 on small devices: the shorter handshake saves time and data, and with the old cipher suites removed there are fewer ways to set it up wrongly. TLS 1.2 with the right cipher suite is still acceptable.
 
 ### Cipher Suites for Constrained Devices
 
-Not all cipher suites are equal in computational cost. For ESP32 class devices (240 MHz, hardware AES acceleration):
+A cipher suite is the set of algorithms that one connection uses. Some cost a small processor much more work than others. For ESP32 class devices (240 MHz, hardware AES acceleration):
 
 ```text title="Recommended cipher suites for IoT"
 # TLS 1.3 (preferred)
@@ -173,7 +142,7 @@ Avoid RSA key exchange (no forward secrecy), CBC mode ciphers (vulnerable to pad
 <InArticleAd />
 
 
-TLS authentication is built on X.509 certificates organized in a chain of trust:
+A certificate is a public key and a name, signed by someone the receiver already trusts. The signer is a certificate authority (CA). It works like a passport: the border officer does not know the traveller, but trusts the government that issued the passport. The comparison stops at the photo. A certificate has none, so its holder proves ownership by using the private key that matches it, and that key is never sent. X.509 is the standard format, and certificates form a chain of trust:
 
 ```text title="Certificate chain of trust"
 Root CA Certificate (self-signed, kept offline)
@@ -190,10 +159,10 @@ Root CA Certificate (self-signed, kept offline)
 
 **Why this hierarchy matters:**
 
-- The **Root CA** private key is the master secret. If compromised, every certificate in the chain is untrustworthy. Keep it offline (USB drive in a safe, or better, an HSM).
-- The **Intermediate CA** signs day-to-day certificates. If compromised, you revoke the intermediate and issue a new one without replacing the root on every device.
-- **Server certificates** prove the broker is who it claims to be. This is what Lesson 2 configured.
-- **Device certificates** prove each device is who it claims to be. This is what we add in this lesson.
+- The **Root CA** private key is the master secret. If it is stolen, no certificate in the chain can be trusted. Keep it offline (a USB drive in a safe, or better an HSM, a hardware module that keeps keys and never releases them).
+- The **Intermediate CA** signs the daily certificates. If its key is stolen, you cancel the intermediate and issue a new one, and the root on every device stays.
+- **Server certificates** prove that the broker is the real one. You set this up when you first secured the broker.
+- **Device certificates** prove which device is speaking. This lesson adds them.
 
 ### Certificate Fields That Matter
 
@@ -235,6 +204,7 @@ cd ~/iot-ca
     - intermediate.key
     - intermediate.csr
     - intermediate.crt
+    - ca-chain.crt
   - server/
     - broker.key
     - broker.csr
@@ -292,6 +262,10 @@ cd ~/iot-ca
 
    # Verify the chain
    openssl verify -CAfile root/ca.crt intermediate/intermediate.crt
+
+   # Bundle both CA certificates. The broker needs this file to check
+   # device certificates, because they are signed by the Intermediate CA
+   cat intermediate/intermediate.crt root/ca.crt > intermediate/ca-chain.crt
    ```
 
    The `pathlen:0` constraint means this intermediate CA cannot sign other CA certificates, only end-entity certificates (server and device certs). This limits the damage if the intermediate key is compromised.
@@ -320,8 +294,11 @@ cd ~/iot-ca
    # Create the full chain file (broker cert + intermediate cert)
    cat server/broker.crt intermediate/intermediate.crt > server/broker-fullchain.crt
 
-   # Verify the full chain against the Root CA
-   openssl verify -CAfile root/ca.crt server/broker-fullchain.crt
+   # Verify the broker certificate against the Root CA
+   # (openssl verify reads only the first certificate in a file,
+   # so the intermediate is passed with -untrusted)
+   openssl verify -CAfile root/ca.crt \
+     -untrusted intermediate/intermediate.crt server/broker.crt
    ```
 
    :::tip[SAN is required]
@@ -369,7 +346,7 @@ cd ~/iot-ca
 
    set -euo pipefail
 
-   DEVICE_ID="$1"
+   DEVICE_ID="${1:-}"
    CA_DIR="$HOME/iot-ca"
    DAYS_VALID=365
 
@@ -418,12 +395,12 @@ cd ~/iot-ca
 
 </Steps>
 
-## Server-Side TLS (Review from Lesson 2)
+## Server-Side TLS (Review)
 
 <InArticleAd />
 
 
-In Lesson 2 we configured Mosquitto with server-side TLS. Here is the relevant configuration for reference:
+You configured Mosquitto with server-side TLS when you set up the broker. This is that configuration:
 
 ```conf title="mosquitto.conf (server-side TLS only)"
 # Listener on port 8883 with TLS
@@ -445,7 +422,7 @@ With this configuration:
 - Clients authenticate with a **username and password**.
 - All traffic is encrypted.
 
-This is good, but has a limitation: any client that knows the username and password can connect. If a password leaks (hardcoded in firmware that someone extracts), anyone can impersonate that device. Mutual TLS eliminates this risk.
+The limit of this setup: any client that knows the username and password can connect. If a password is read out of one device's firmware, anyone can connect as that device. With mutual TLS a password alone is no longer enough.
 
 ## Mutual TLS (mTLS)
 
@@ -458,7 +435,6 @@ In mutual TLS, both sides present certificates:
 Client (ESP32)                         Server (Mosquitto)
      |                                       |
      |  --- ClientHello --->                 |
-     |                                       |
      |  <--- ServerHello ---                 |
      |  <--- Server Certificate ---          |
      |  <--- CertificateRequest ---          |  (Server asks client for a cert)
@@ -466,9 +442,8 @@ Client (ESP32)                         Server (Mosquitto)
      |  --- Client Certificate --->          |  (Client sends its cert)
      |  --- ClientKeyExchange --->           |
      |  --- CertificateVerify --->           |  (Client proves it owns the key)
-     |                                       |
-     |  <--- Finished ---                    |
      |  --- Finished --->                    |
+     |  <--- Finished ---                    |
      |                                       |
      |  ====== Encrypted channel ======      |
 ```
@@ -483,8 +458,10 @@ Update your Mosquitto configuration to require client certificates:
 # Listener on port 8883 with mutual TLS
 listener 8883
 
-# CA certificate (used to verify both server and client certs)
-cafile /etc/mosquitto/certs/ca.crt
+# CA certificates used to verify client certs. Device certificates are
+# signed by the Intermediate CA, so this file must hold the intermediate
+# and the root (the ca-chain.crt bundle made earlier)
+cafile /etc/mosquitto/certs/ca-chain.crt
 
 # Server certificate and key
 certfile /etc/mosquitto/certs/broker-fullchain.crt
@@ -503,7 +480,7 @@ tls_version tlsv1.2
 
 The two critical settings:
 
-- **`require_certificate true`** tells Mosquitto to send a `CertificateRequest` during the TLS handshake and reject any client that does not present a valid certificate signed by the CA in `cafile`.
+- **`require_certificate true`** tells Mosquitto to send a `CertificateRequest` during the TLS handshake and reject any client that does not present a valid certificate that chains to a CA in `cafile`. Our device certificates are signed by the Intermediate CA, so `cafile` must contain the intermediate certificate as well as the root.
 - **`use_identity_as_username true`** extracts the Common Name (CN) from the client certificate and uses it as the MQTT username. This eliminates the need for a separate password file. The device identity is cryptographically bound to its certificate.
 
 Restart Mosquitto and test with the `mosquitto_pub` command-line tool:
@@ -555,14 +532,14 @@ Add the ACL file to `mosquitto.conf`:
 acl_file /etc/mosquitto/acl.conf
 ```
 
-With this setup, a device with CN=`sensor-001` can only publish to `devices/sensor-001/telemetry/#` and subscribe to `devices/sensor-001/commands/#`. Even if an attacker extracts the certificate from one device, they cannot impersonate a different device.
+With this setup, a device with CN=`sensor-001` can only publish to `devices/sensor-001/telemetry/#` and subscribe to `devices/sensor-001/commands/#`. An attacker who copies the certificate and key out of one device cannot act as a different device. The attacker can still send false data as that one device, until you revoke its certificate.
 
 ## ESP32 Mutual TLS Client
 
 <InArticleAd />
 
 
-Now let us write the ESP32 firmware that connects to Mosquitto using mutual TLS. The ESP32 needs three PEM files embedded in its firmware:
+The ESP32 firmware that connects to Mosquitto with mutual TLS needs three files in PEM format (the text form of a certificate or key):
 
 1. **CA certificate** (`ca.crt`): to verify the broker's certificate
 2. **Client certificate** (`sensor-001.crt`): the device's identity
@@ -596,6 +573,10 @@ idf_component_register(
 
 ### ESP-IDF mTLS MQTT Client
 
+Most of this program is the usual Wi-Fi and MQTT code. The part to read is `mqtt_init`: it gives the client the CA certificate, to check the broker, and the device certificate with its private key, to prove which device this is. There is no password.
+
+Anyone who has the firmware file or a copy of the flash can read a private key built into the firmware. That is acceptable while you learn. The provisioning part of this lesson stores the key separately for each device.
+
 ```c title="main/main.c"
 #include <stdio.h>
 #include <string.h>
@@ -605,6 +586,7 @@ idf_component_register(
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "nvs_flash.h"
+#include "esp_random.h"
 #include "mqtt_client.h"
 
 static const char *TAG = "MTLS_MQTT";
@@ -907,7 +889,7 @@ The three calls `setCACert()`, `setCertificate()`, and `setPrivateKey()` are all
 <InArticleAd />
 
 
-Generating certificates on your development machine and copying them into firmware works for prototypes, but at scale you need a provisioning workflow. There are three common approaches.
+Provisioning means giving a device its identity before it starts work. Copying certificates into the firmware by hand works for a prototype. For many devices you need a repeatable process. There are two common ones, and a third process that renews a certificate before it expires.
 
 ### 1. Factory Provisioning
 
@@ -976,9 +958,9 @@ In factory provisioning, each device receives its unique certificate and private
 
 </Steps>
 
-**Advantages:** Strongest security. Each device has a unique key that never traverses a network. Private keys are generated and stored locally.
+**Advantages:** Strongest security. Each device has its own key, and the key never travels over a network.
 
-**Disadvantages:** Requires a provisioning station on the manufacturing line. Does not scale well for devices manufactured by third-party contract manufacturers who you do not fully trust with your CA key.
+**Disadvantages:** Needs a provisioning station on the production line. Unsuitable when another company builds the devices and you do not trust it with your CA key.
 
 ### 2. First-Boot Provisioning
 
@@ -1015,7 +997,7 @@ Device (first boot)                    Provisioning Server
 
 </Steps>
 
-Here is a minimal Python provisioning server:
+This is a minimal Python provisioning server. `/provision` accepts a token once, signs the request and returns the certificate. `/generate-token` makes tokens and has no login as written, so only you must be able to reach it. The server holds the Intermediate CA key: whoever controls it can issue device certificates.
 
 ```python title="provisioning_server.py"
 from flask import Flask, request, jsonify
@@ -1114,9 +1096,9 @@ if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, ssl_context="adhoc")
 ```
 
-**Advantages:** Private key never leaves the device. Scales well because devices self-provision. Works with contract manufacturers who only need to burn a token, not handle CA keys.
+**Advantages:** The private key never leaves the device. Devices provision themselves, and a factory handles only tokens, never CA keys.
 
-**Disadvantages:** Requires a provisioning server that must be available when devices first boot. The bootstrap channel (HTTPS with an ad-hoc certificate) is less secure than factory provisioning.
+**Disadvantages:** The provisioning server must be reachable when a device first starts. The first connection (HTTPS with an ad-hoc certificate) is less secure than factory provisioning.
 
 ### 3. Certificate Rotation
 
@@ -1144,7 +1126,7 @@ void check_certificate_expiry(void)
 }
 ```
 
-The renewal request uses the device's current (still valid) certificate for authentication. The provisioning server verifies the existing certificate, signs the new CSR, and returns the new certificate. This creates a seamless rotation with no downtime.
+The device proves itself in the renewal request with its current certificate, which must still be valid. The provisioning server checks it, signs the new CSR, and returns the new certificate. A device that stays switched off past the expiry date cannot renew by itself and must be provisioned again.
 
 ## SiliconWit.io Security Model
 
@@ -1205,7 +1187,7 @@ Developer Machine                       ESP32 Device
 
 ### ESP32 Secure Boot V2
 
-ESP32 supports Secure Boot V2, which uses RSA-PSS signatures to verify the bootloader and application at every boot. This was covered in detail in the [ESP32 course](/education/embedded-programming-esp32/) (Lesson 7: OTA Updates and Secure Boot). Here is a summary of the key steps:
+ESP32 supports Secure Boot V2, which uses RSA-PSS signatures to verify the bootloader and application at every boot. The ESP32 course covers it in detail under [OTA updates and secure boot](/education/embedded-programming-esp32/ota-updates-secure-boot/). The main steps are:
 
 <Steps>
 
@@ -1295,18 +1277,18 @@ int verify_firmware_signature(const uint8_t *image, size_t image_len)
 }
 ```
 
-Integrate this check into your OTA update handler: download the signed image, call `verify_firmware_signature()`, and only proceed with `esp_ota_write()` if verification passes.
+In your OTA update handler, download the signed image, call `verify_firmware_signature()`, and continue to `esp_ota_write()` only if it passes.
 
 ## Network Segmentation
 
 <InArticleAd />
 
 
-Even with TLS and mTLS, placing IoT devices on the same network as workstations, file servers, and databases is risky. A compromised IoT device should not be able to reach your accounting database.
+TLS protects the messages. It does not limit what a taken-over device can reach. A sensor must never be able to reach your accounting database.
 
 ### VLAN Isolation
 
-Create a separate VLAN for IoT devices. Most managed switches and enterprise routers support VLANs:
+A VLAN (virtual LAN) is a separate network made inside the same switches. Create one for IoT devices. Most managed switches and business routers support VLANs:
 
 ```text title="Network segmentation example"
 VLAN 10 (Corporate):    192.168.10.0/24
@@ -1328,10 +1310,10 @@ Firewall rules:
 
 Key principles:
 
-- IoT devices can only reach the MQTT broker. Nothing else.
+- IoT devices can reach the MQTT broker and nothing else.
 - The broker, database, and dashboard run on a separate backend VLAN.
-- Corporate users access dashboards via the firewall, not by being on the same subnet as IoT devices.
-- IoT devices have no internet access (except NTP for time sync, if needed). Updates are pulled from the backend VLAN.
+- Office users reach dashboards through the firewall.
+- IoT devices have no internet access (except NTP for time, if needed). Updates come from the backend VLAN.
 
 ### Firewall Rules for Mosquitto
 
@@ -1353,31 +1335,31 @@ iptables -A INPUT -p tcp --dport 8883 -j DROP
 <InArticleAd />
 
 
-These are the mistakes we see most often in IoT deployments. Avoid all of them.
+These mistakes appear most often in IoT deployments.
 
 <CardGrid>
   <Card title="Hardcoded Credentials" icon="error">
-    Wi-Fi passwords, MQTT tokens, API keys baked into source code or firmware binaries. Anyone with a firmware dump can extract them. **Fix:** Store credentials in NVS, provision per-device, use mTLS certificates instead of passwords.
+    Wi-Fi passwords, MQTT tokens or API keys written into source code or firmware. Anyone with a copy of the firmware can read them. **Fix:** Store credentials in NVS, one set per device, and use mTLS certificates.
   </Card>
 
   <Card title="No TLS" icon="error">
-    Plaintext MQTT on port 1883. All sensor data, commands, and credentials visible to anyone on the network with a packet sniffer. **Fix:** Always use port 8883 with TLS. There is no valid reason to use unencrypted MQTT in production.
+    Plain MQTT on port 1883. Anyone on the network can read the sensor data, the commands and the passwords. **Fix:** Use port 8883 with TLS in every production system.
   </Card>
 
   <Card title="Unpatched Firmware" icon="error">
-    Devices deployed and never updated. Known vulnerabilities in mbedTLS, lwIP, or the RTOS accumulate over time. **Fix:** Implement OTA updates from Lesson 2, sign all firmware, check for updates periodically.
+    Devices installed and never updated, while known faults in mbedTLS, lwIP or the RTOS collect. **Fix:** Update over the air, sign all firmware, and check for updates on a schedule.
   </Card>
 
   <Card title="Open Debug Ports" icon="error">
-    JTAG, UART, and USB debug interfaces left enabled in production firmware. An attacker with physical access can dump memory, extract keys, or inject code. **Fix:** Disable JTAG via eFuse on ESP32. Remove UART debug output in release builds. Enable secure boot.
+    JTAG, UART and USB debug interfaces left enabled in production. A person who holds the device can copy its memory and keys, or load code. **Fix:** Disable JTAG by eFuse on ESP32, remove UART debug output from release builds, and enable secure boot.
   </Card>
 
   <Card title="Default Passwords" icon="error">
-    Shipping devices with "admin/admin" or "root/root" and hoping users will change them. They will not. **Fix:** Force unique credentials during provisioning. Use certificate-based authentication where no user password exists.
+    Devices shipped with "admin/admin" in the hope that users change it. They do not. **Fix:** Give each device its own credentials at provisioning, or certificates with no password at all.
   </Card>
 
   <Card title="No Certificate Rotation" icon="error">
-    Certificates with 10-year validity or no rotation plan. Long-lived credentials are more likely to be compromised over time. **Fix:** Issue certificates with 1-year validity. Implement automatic rotation 30 days before expiry.
+    Certificates valid for 10 years, with no plan to renew them. The longer a key lives, the more chances there are to steal it. **Fix:** Issue certificates for 1 year and renew them automatically 30 days before expiry.
   </Card>
 </CardGrid>
 
@@ -1449,7 +1431,7 @@ Set up the full mutual TLS pipeline from scratch:
 5. Verify that a connection with a certificate signed by a different CA is rejected.
 6. Write ACL rules so each device can only publish to its own topic subtree, then test that `sensor-001` cannot publish to `devices/sensor-002/telemetry`.
 
-**Deliverable:** A working mTLS setup with two device certificates, ACL rules, and a test log showing accepted and rejected connections.
+**Deliverable:** A test log with accepted and rejected connections.
 
 ### Exercise 2: ESP32 mTLS Sensor Node
 
@@ -1461,7 +1443,7 @@ Flash the ESP32 mTLS firmware from this lesson and connect to your Mosquitto bro
 4. Verify in the Mosquitto log that the device authenticated with its certificate CN.
 5. Try connecting with an expired certificate (generate one with `-days 1` and wait, or set your system clock forward). Confirm the connection is rejected.
 
-**Deliverable:** Serial monitor output showing successful mTLS connection and data publishing, plus Mosquitto log entries confirming certificate-based authentication.
+**Deliverable:** Serial monitor output of the mTLS connection, and the Mosquitto log lines that name the certificate.
 
 ### Exercise 3: First-Boot Provisioning System
 
@@ -1474,18 +1456,18 @@ Build a minimal provisioning system:
 5. Verify that using the same token twice is rejected.
 6. Verify that provisioned devices can connect to Mosquitto with mTLS.
 
-**Deliverable:** Provisioning server running, three devices provisioned, Mosquitto accepting mTLS connections from all three. A brief write-up of the provisioning flow.
+**Deliverable:** Three provisioned devices that Mosquitto accepts, and a short description of the flow.
 
 ### Exercise 4: Security Audit
 
-Audit your IoT setup from the previous lessons in this course (broker, dashboard, Node-RED, ESP32 clients) against the security checklist in this lesson:
+Audit the IoT setup you built in this course (broker, dashboard, Node-RED, ESP32 clients) against the security checklist in this lesson:
 
 1. Go through every item in the checklist and mark it as pass, fail, or not applicable.
 2. For each failing item, write a one-paragraph remediation plan with specific steps.
 3. Implement at least three of the remediation steps.
 4. Re-audit after remediation and document the improvement.
 
-**Deliverable:** A completed audit checklist (before and after), remediation plans, and evidence of implemented fixes (configuration changes, test results).
+**Deliverable:** The checklist before and after, with evidence of each repair.
 
 ## Summary
 
@@ -1494,25 +1476,25 @@ Audit your IoT setup from the previous lessons in this course (broker, dashboard
 
 | Topic | Key Takeaway |
 |-------|-------------|
-| Threat landscape | IoT devices are always on, rarely updated, and often physically accessible. Security must be built in from the start. |
-| OWASP IoT Top 10 | Know the common vulnerabilities. Most IoT breaches exploit weak passwords, no TLS, or lack of updates. |
-| TLS | Provides confidentiality, authentication, and integrity. Use TLS 1.3 when possible, TLS 1.2 with AEAD ciphers otherwise. |
-| Certificate hierarchy | Root CA (offline) signs Intermediate CA, which signs server and device certificates. This limits blast radius if a key is compromised. |
-| Server-side TLS | Broker proves its identity to devices. Good baseline, but devices are authenticated only by password. |
-| Mutual TLS | Both broker and device prove identity via certificates. Eliminates password-based attacks. Use `require_certificate true` in Mosquitto. |
-| Provisioning | Factory provisioning is strongest. First-boot provisioning scales better. Certificate rotation keeps credentials fresh. |
-| Firmware signing | Sign all OTA binaries. Device verifies signature before flashing. ESP32 Secure Boot V2 makes this hardware-enforced. |
-| Network segmentation | Isolate IoT devices on a dedicated VLAN. Firewall rules restrict traffic to the MQTT broker only. |
+| Threats | IoT devices are always on, rarely updated, and often within reach of a stranger's hand. |
+| OWASP IoT Top 10 | Most IoT attacks use weak passwords, missing TLS, or missing updates. |
+| TLS | Hides messages, proves identity, detects changes. Use TLS 1.3, or TLS 1.2 with AEAD ciphers. |
+| Certificate hierarchy | An offline Root CA signs an Intermediate CA, which signs server and device certificates. A stolen intermediate key can be replaced. |
+| Server-side TLS | The broker proves its identity. Devices are known only by a password. |
+| Mutual TLS | Broker and device both prove identity with certificates, so a stolen password is not enough. A copied private key still is. Use `require_certificate true` in Mosquitto. |
+| Provisioning | Factory provisioning is strongest. First-boot provisioning suits large numbers. Renew certificates before they expire. |
+| Firmware signing | Sign every OTA file. The device checks the signature before it installs. Secure Boot V2 enforces this in hardware. |
+| Network segmentation | Put IoT devices on their own VLAN, able to reach only the MQTT broker. |
 
-In the next and final lesson, we bring everything together: broker, clients, dashboards, alerts, automation, and security into a complete production IoT monitoring system.
+The final lesson joins the broker, clients, dashboards, alerts, automation and security into one production IoT monitoring system.
 
 ## What is Next?
 
 <InArticleAd />
 
 
-<LinkButton href="/education/iot-systems/production-iot-monitoring-system" variant="primary">
-  Lesson 8: Production IoT Monitoring System
+<LinkButton href="/education/iot-systems/production-iot-monitoring-system/" variant="primary">
+  Next: Production IoT Monitoring System
 </LinkButton>
 
 <IoTSystemsComments />

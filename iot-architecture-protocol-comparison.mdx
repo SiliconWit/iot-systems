@@ -25,7 +25,9 @@ import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/sta
 
 import IoTSystemsComments from '../../../../components/iot-systems/IoTSystemsComments.astro';
 
-Pick the wrong protocol for a battery-powered sensor node and it drains in days instead of months. Use HTTP where MQTT would suffice and you burn 100x the bandwidth on headers alone. Use MQTT where CoAP fits better and you pay for a persistent TCP connection that a constrained device cannot afford. These are not theoretical differences: they show up in your power budget, your cellular data bill, and your network capacity. In this lesson you will implement MQTT, CoAP, and HTTP on the same ESP32 with the same BME280 sensor, measure message size, round-trip time, and power draw with real numbers, and walk away with a clear framework for when to use each protocol. #IoT #MQTT #Protocols
+A battery sensor that should last months is empty in days. A mobile data bill is ten times what you planned. Often the cause is the protocol, the set of rules a device uses to send its readings: one protocol wraps a 120-byte reading in 350 bytes of extra text, another in 30 bytes. In this lesson you send the same reading from one ESP32 with three protocols (MQTT, CoAP and HTTP), measure the bytes and the time each one needs, and learn how to choose between them. #IoT #MQTT #Protocols
+
+The three protocols side by side. Each row is explained in the lesson.
 
 ```text
   Protocol Comparison at a Glance
@@ -68,25 +70,20 @@ A single ESP32 reads temperature, humidity, and pressure from a BME280 sensor, t
 | U2 | BME280 breakout module | 1 | I2C, 3.3V compatible |
 | | Breadboard + jumper wires | 1 set | |
 
+Most IoT systems have three tiers. Devices measure, a gateway (a small local computer) collects, and a remote server stores the data and shows it to people.
+
 ```text
-  IoT System Architecture: 3-Tier Model
-  ──────────────────────────────────────────
-  DEVICE TIER           GATEWAY TIER     CLOUD TIER
-  ───────────           ────────────     ──────────
-  ┌─────────┐           ┌──────────┐    ┌────────┐
-  │ ESP32   ├──MQTT────►│          │    │        │
-  │ BME280  │           │  RPi /   ├───►│ Cloud  │
-  └─────────┘           │  Server  │    │ DB +   │
-  ┌─────────┐           │          │    │ Dash-  │
-  │ Pico W  ├──MQTT────►│ Broker + │    │ board  │
-  │ Sensor  │           │ DB +     │    │        │
-  └─────────┘           │ Rules    │    └────────┘
-  ┌─────────┐           └──────────┘
-  │ STM32 + ├──MQTT────►
-  │ ESP-01  │
-  └─────────┘
-  Low power,            Aggregation,     Storage,
-  local sensing         local storage    analytics
+  DEVICE        GATEWAY         CLOUD
+  ──────        ───────         ─────
+  ┌───────┐     ┌─────────┐    ┌─────────┐
+  │ ESP32 ├────►│ Local   │    │ Storage,│
+  └───────┘     │ server: ├───►│ charts, │
+  ┌───────┐     │ broker, │    │ alerts  │
+  │ Pico W├────►│ database│    └─────────┘
+  └───────┘     └─────────┘
+  measures,     collects,      keeps records,
+  acts          stores         compares
+  locally       locally        sites
 ```
 
 ## IoT System Architectures
@@ -94,11 +91,11 @@ A single ESP32 reads temperature, humidity, and pressure from a BME280 sensor, t
 <InArticleAd />
 
 
-Before comparing protocols, you need to understand the network topologies that IoT systems use. The architecture you choose determines which protocols are practical, how data flows, and where processing happens.
+A protocol only makes sense inside a network shape, called a topology. The shape decides which protocols are practical and where the data is processed. There are four common shapes.
 
 ### Star Topology
 
-In a star topology, every device connects directly to a central server or broker. This is the simplest architecture. Each sensor node has its own network connection (Wi-Fi, cellular, Ethernet) and sends data to the cloud or a local server without any intermediary.
+In a star topology, every device connects directly to one central server. This is the simplest shape. Each sensor node has its own network connection (Wi-Fi, cellular, Ethernet).
 
 **Advantages:**
 - Simple to implement and debug
@@ -146,10 +143,12 @@ A gateway sits between constrained devices and the cloud. Local devices communic
 
 ### Edge/Fog Computing
 
-Edge computing pushes processing closer to the data source. Instead of sending raw sensor readings to the cloud, an edge node (gateway, local server, or powerful MCU) runs analytics, filtering, or ML inference locally. Only results, anomalies, or aggregated summaries go to the cloud.
+Edge computing does the processing close to where the data is made. An edge node (a gateway, a local server or a strong microcontroller) filters and analyses the raw readings on site. Only results, unusual events and summaries go to the cloud.
+
+One rule holds in every topology: a fast decision or a safety limit stays in the device or the local controller. A remote server is for oversight: records, alerts to people, and comparing sites. The network can fail, and a machine must stay safe when it does.
 
 **Advantages:**
-- Dramatically reduces cloud bandwidth and storage costs
+- Reduces cloud bandwidth and storage costs
 - Lower latency for time-critical decisions (safety shutoffs, motor control)
 - Works during internet outages (local autonomy)
 
@@ -162,7 +161,7 @@ Edge computing pushes processing closer to the data source. Instead of sending r
 
 <CardGrid>
   <Card title="This Course Uses Star + Gateway" icon="information">
-    Most lessons in this course use a star topology: ESP32 devices connect directly to an MQTT broker over Wi-Fi. In Lesson 3 you will also see the gateway pattern when an STM32 sends data through an ESP-01 Wi-Fi module. The edge computing pattern appears in Lesson 8 when the Raspberry Pi runs local analytics before forwarding to the cloud.
+    Most lessons in this course use a star topology: ESP32 devices connect directly to an MQTT broker over Wi-Fi. You meet the gateway pattern when an STM32 sends its data through an ESP-01 Wi-Fi module, and the edge pattern when a Raspberry Pi analyses data on site before it forwards a summary.
   </Card>
 </CardGrid>
 
@@ -171,61 +170,48 @@ Edge computing pushes processing closer to the data source. Instead of sending r
 <InArticleAd />
 
 
-Every IoT protocol solves the same fundamental problem: how does a small device with limited memory, CPU, and battery send data to a server reliably? The three dominant protocols take very different approaches.
+Every IoT protocol answers the same question: how does a small device with little memory and a small battery send data to a server and know that it arrived? The three protocols answer it differently.
+
+Two words come first, because each protocol is carried by one of two transports:
+
+- **TCP** opens a connection first (a short exchange called a handshake), keeps it open, and sends lost data again. It is like a telephone call.
+- **UDP** sends single packets with no connection and no promise. It is like a postcard: cheap, and nobody tells you if it is lost.
 
 ### MQTT (Message Queuing Telemetry Transport)
 
-MQTT uses a **publish/subscribe** model over TCP. Devices never talk to each other directly. Instead, they communicate through a central **broker**. A device that has data **publishes** a message to a **topic** (a hierarchical string like `site/building/floor/room/device/sensor`). Any device that wants that data **subscribes** to the same topic. The broker routes messages from publishers to all matching subscribers.
+MQTT uses a **publish/subscribe** model over TCP. Devices never talk to each other directly. A device **publishes** a message to a **topic** (a name with levels, such as `site/building/room/device/sensor`) on a central server called the **broker**. Any client that wants the data **subscribes** to the topic, and the broker passes each message to every matching subscriber. The lesson on [MQTT with the ESP32](/education/embedded-programming-esp32/mqtt-cloud-communication/) teaches this model in full.
 
 **Key characteristics:**
-- Runs over TCP (port 1883 plain, 8883 TLS)
-- Persistent connections: the device opens one TCP connection and keeps it alive with periodic PINGREQ/PINGRESP packets
-- Three QoS levels: 0 (fire and forget), 1 (at least once), 2 (exactly once)
-- Retained messages: the broker stores the last message on a topic and delivers it immediately to new subscribers
-- Last Will and Testament: the broker publishes a predefined message if a device disconnects unexpectedly
-- Minimal overhead: a PUBLISH packet with QoS 0 adds only 2 bytes of header to the payload
-
-**When to use MQTT:**
-- You need real-time push from device to server (or server to device)
-- Devices are behind firewalls or NAT (outbound TCP works everywhere)
-- You want decoupled publishers and subscribers
-- Battery life matters (one persistent connection beats repeated HTTP handshakes)
+- Runs over TCP (port 1883 plain, 8883 with TLS encryption)
+- One connection stays open. The device keeps it alive with small ping packets.
+- Three quality of service (QoS) levels: 0 (sent once, no confirmation), 1 (the broker confirms, repeats are possible), 2 (the broker receives it once only). Each level describes one step, from the sender to the broker. No level tells the device that a subscriber received the message.
+- Retained messages: the broker keeps the last message on a topic and gives it to each new subscriber
+- Last will: the broker publishes a message you chose in advance if a device disappears
+- Small header: the fixed part of a PUBLISH packet can be 2 bytes, but the topic name travels with every message
 
 ### CoAP (Constrained Application Protocol)
 
-CoAP uses a **request/response** model over UDP. It was designed for extremely constrained devices (8-bit MCUs with 10 KB of RAM) that cannot afford TCP's overhead. CoAP messages are compact binary packets with a 4-byte fixed header. The protocol supports GET, PUT, POST, and DELETE methods, making it feel like a lightweight HTTP.
+CoAP uses a **request/response** model over UDP: the device asks, the server answers. It was designed for very small devices (8-bit microcontrollers with 10 KB of RAM) that cannot afford a TCP connection. A CoAP message is a compact binary packet with a 4-byte fixed header. It has the methods GET, PUT, POST and DELETE, so it feels like a small HTTP.
 
 **Key characteristics:**
-- Runs over UDP (port 5683 plain, 5684 DTLS)
-- Connectionless: no persistent connection, no TCP handshake
-- Confirmable (CON) and non-confirmable (NON) message types for reliability control
-- Observe option: a client can subscribe to a resource and receive notifications when it changes (similar to MQTT subscriptions but resource-based)
-- Block-wise transfer for payloads larger than one UDP datagram
-- Content negotiation via media type options (application/json, application/cbor)
-
-**When to use CoAP:**
-- Devices are extremely RAM/ROM constrained
-- The network is lossy and you want fast recovery (UDP retransmit is simpler than TCP backoff)
-- You need a REST-like interface on the device itself (e.g., reading a sensor value with GET)
-- Multicast discovery is needed (CoAP supports UDP multicast)
+- Runs over UDP (port 5683 plain, 5684 with DTLS, the encryption used on UDP)
+- No connection and no handshake
+- Confirmable (CON) messages are answered with an acknowledgement (ACK) and repeated if none comes. Non-confirmable (NON) messages are sent once.
+- Observe option: a client asks to be told each time a value changes (like an MQTT subscription, but to one resource on one device)
+- Block-wise transfer for a payload larger than one UDP packet
 
 ### HTTP (Hypertext Transfer Protocol)
 
-HTTP is the universal protocol of the web. Every server, every browser, every proxy, every CDN speaks HTTP. For IoT, HTTP means POSTing JSON to a REST API endpoint. It works, it is well understood, and every cloud platform has an HTTP ingestion endpoint.
+HTTP is the protocol of the web. Every server, browser and proxy speaks it. For IoT, HTTP means that the device sends its reading as JSON text in a POST request to a web address. It is well understood, and almost every cloud service accepts it.
 
 **Key characteristics:**
-- Runs over TCP (port 80 plain, 443 TLS)
-- Stateless: every request is independent, no persistent session by default
-- Text-based headers add significant overhead (often 500+ bytes per request)
-- TLS handshake is expensive on constrained devices (CPU, memory, time)
-- Universal firewall and proxy compatibility
-- Native browser support (fetch, XMLHttpRequest, WebSocket upgrade)
+- Runs over TCP (port 80 plain, 443 with TLS)
+- Stateless: every request stands alone, and by default each one opens a new connection
+- Text headers add hundreds of bytes to every request
+- A TLS handshake costs a small device processor time, memory and seconds
+- Passes almost every firewall and proxy, and browsers speak it directly
 
-**When to use HTTP:**
-- You are integrating with existing web services or REST APIs
-- Data is sent infrequently (once per minute or less)
-- The device has plenty of RAM and a fast CPU (ESP32, Raspberry Pi)
-- You need browser-based device interaction without a broker
+The section "When to Choose Each Protocol" below turns these properties into a choice.
 
 ## Protocol Comparison Table
 
@@ -240,7 +226,7 @@ HTTP is the universal protocol of the web. Every server, every browser, every pr
 | **Header Overhead** | 2 bytes minimum | 4 bytes fixed | 200-800+ bytes |
 | **Payload Format** | Any (binary, JSON, CBOR) | Any (binary, JSON, CBOR) | Any (typically JSON) |
 | **Persistent Connection** | Yes (keep-alive) | No (UDP) | Optional (HTTP/1.1 keep-alive) |
-| **Reliability** | QoS 0/1/2 | CON/NON + retransmit | TCP guarantees delivery |
+| **Reliability** | QoS 0/1/2, to the broker | CON/NON + retransmit | The response code confirms that the server received it |
 | **Latency** | Low (persistent conn) | Very low (no handshake) | High (TCP + TLS handshake per request) |
 | **Bandwidth** | Very low | Lowest | High |
 | **Power Consumption** | Low (sleep between pings) | Lowest (no connection to maintain) | Highest (full handshake each time) |
@@ -272,7 +258,7 @@ If your BME280 module has a voltage regulator (most breakout boards do), you can
 <InArticleAd />
 
 
-We will use the Arduino framework with PubSubClient for the MQTT implementation. This keeps the code focused on the protocol differences rather than ESP-IDF boilerplate.
+The MQTT sender uses the Arduino framework with the PubSubClient library, so the code stays short and the protocol differences are easy to see.
 
 ### Arduino Setup
 
@@ -289,6 +275,8 @@ We will use the Arduino framework with PubSubClient for the MQTT implementation.
 </Steps>
 
 ### MQTT Code
+
+The program connects to Wi-Fi and to the broker once, then every 10 seconds reads the sensor, builds a JSON text and publishes it. Notice `send_mqtt`: it reads the clock before and after `publish` to time the send. PubSubClient publishes with QoS 0 only, so `OK` means the bytes left the program. It does not mean the broker received them.
 
 ```cpp title="mqtt_sender.ino"
 #include <WiFi.h>
@@ -448,9 +436,11 @@ SiliconWit.io accepts MQTT, CoAP, and HTTP. Connection details, certificates, an
 <InArticleAd />
 
 
-CoAP runs over UDP, so the ESP32 does not need a persistent TCP connection. We use a lightweight CoAP library that builds the binary packet manually.
+CoAP runs over UDP, so the ESP32 opens no connection. The program below uses no CoAP library: it builds the binary packet byte by byte, which shows how small the packet is.
 
 ### CoAP Client Code
+
+Notice two functions. `build_coap_post` writes the 4-byte header, a 1-byte token, the path and the payload into a buffer. `send_coap` sends that buffer as one UDP packet and waits up to 2 seconds for the server's ACK, so here the measured time is a true round trip.
 
 ```cpp title="coap_sender.ino"
 #include <WiFi.h>
@@ -702,9 +692,11 @@ pip install aiocoap
 <InArticleAd />
 
 
-HTTP is the simplest protocol to implement on the ESP32 because the Arduino core includes a full HTTP client. The trade-off is overhead: every request carries text headers, and TLS requires a full handshake unless you use HTTP/1.1 keep-alive.
+HTTP is the simplest protocol to program on the ESP32 because the Arduino core includes a full HTTP client. The price is overhead: every request carries text headers, and with TLS every new connection needs a full handshake.
 
 ### HTTP Client Code
+
+Notice `send_http`: `http.POST` opens a TCP connection, sends the headers and the JSON, and waits for the server's answer. The timer covers all of it, and the status code 200 is a real confirmation from the server.
 
 ```cpp title="http_sender.ino"
 #include <WiFi.h>
@@ -800,6 +792,8 @@ void loop() {
 
 ### HTTP Server (FastAPI)
 
+This small server prints each reading that arrives and answers with a status of ok.
+
 ```python title="http_server.py"
 from fastapi import FastAPI, Request
 from datetime import datetime
@@ -835,7 +829,7 @@ pip install fastapi uvicorn
 <InArticleAd />
 
 
-The most informative way to compare protocols is to run all three from the same firmware, one after another, using the same sensor reading. This eliminates variables like network conditions changing between tests.
+A fair comparison sends the same sensor reading with all three protocols, one after another, from one program. Then the network is the same for all three. The program below joins the three senders you have seen. Each `bench_` function returns the payload size, the estimated bytes on the wire and the time, and `print_results` prints them as a table.
 
 ```cpp title="protocol_bench.ino"
 #include <WiFi.h>
@@ -907,8 +901,11 @@ BenchResult bench_mqtt(const String& payload) {
     }
     mqttClient.loop();
 
-    /* MQTT overhead: 2-byte fixed header + topic length + 2 bytes topic len field */
-    r.wire_bytes = 2 + 2 + strlen(MQTT_TOPIC) + payload.length();
+    /* MQTT overhead: fixed header + 2 bytes topic len field + topic.
+     * The fixed header is 2 bytes while the rest of the packet is under
+     * 128 bytes, and 3 bytes from 128 up to 16383 bytes. */
+    int remaining = 2 + strlen(MQTT_TOPIC) + payload.length();
+    r.wire_bytes = (remaining < 128 ? 2 : 3) + remaining;
 
     unsigned long start = micros();
     r.success = mqttClient.publish(MQTT_TOPIC, payload.c_str());
@@ -1074,13 +1071,17 @@ Sensor: 23.45 C, 48.12 %, 1013.25 hPa
 ========== PROTOCOL COMPARISON ==========
 Proto    | Payload  | Wire(est)  | RTT(us)    | Status
 ---------+----------+------------+------------+--------
-MQTT     | 128      | 163        | 1842       | OK
-CoAP     | 128      | 157        | 3215       | OK
-HTTP     | 128      | 478        | 28463      | OK
+MQTT     | 120      | 153        | 1842       | OK
+CoAP     | 120      | 150        | 3215       | OK
+HTTP     | 120      | 470        | 28463      | OK
 ==========================================
 ```
 
-The numbers you see will vary depending on your network, but the relative order is consistent: MQTT is fastest because the TCP connection is already established, CoAP is close but waits for a UDP ACK, and HTTP is slowest because it performs a full TCP handshake and sends verbose headers with every request.
+Your numbers will differ with your network, but the order stays the same. Read it with care:
+
+- MQTT shows the shortest time because the connection is already open and, at QoS 0, the program does not wait for any answer.
+- CoAP waits for the server's ACK, so its time is a true round trip.
+- HTTP is slowest because it opens a new TCP connection and sends long headers with every request.
 
 ## Measuring and Analyzing Results
 
@@ -1089,11 +1090,11 @@ The numbers you see will vary depending on your network, but the relative order 
 
 ### What the Numbers Mean
 
-**Payload bytes:** The JSON string you are sending. This is identical across all three protocols (same sensor data, same JSON structure). In our test, approximately 128 bytes.
+**Payload bytes:** The JSON string you are sending. This is identical across all three protocols (same sensor data, same JSON structure). In our test, approximately 120 bytes.
 
-**Wire bytes (estimated):** The total bytes actually transmitted on the network, including protocol headers:
-- **MQTT:** 2-byte fixed header + 2-byte topic length + topic string + payload. On an existing connection, MQTT adds roughly 35 bytes of overhead. The TCP connection was already established, so there is no handshake cost.
-- **CoAP:** 4-byte fixed header + 1-byte token + options (Uri-Path, Content-Format) + 1-byte payload marker + payload + 8-byte UDP header. Total overhead is about 29 bytes. No connection setup.
+**Wire bytes (estimated):** The total bytes actually transmitted on the network, including protocol headers. Think of the reading as a letter and the protocol as its envelope: the letter is the same in all three, and only the envelope changes. The comparison stops at the address: in MQTT every character of the topic name is sent again with every message. Per protocol:
+- **MQTT:** fixed header (2 bytes, or 3 bytes when the rest of the packet is 128 bytes or longer, as it is here) + 2-byte topic length + topic string + payload. With the 28-character topic used here, MQTT adds 33 bytes of overhead on an existing connection. The TCP connection was already established, so there is no handshake cost.
+- **CoAP:** 4-byte fixed header + 1-byte token + options (Uri-Path, Content-Format) + 1-byte payload marker + payload + 8-byte UDP header. Total overhead is 30 bytes. No connection setup.
 - **HTTP:** The POST request includes the method line, Host header, Content-Type, Content-Length, and other headers. A typical HTTP POST adds 300 to 500 bytes of overhead. If TLS is used, the initial handshake adds several kilobytes.
 
 **RTT (round-trip time):** The time from starting the send to receiving confirmation:
@@ -1164,7 +1165,7 @@ Collect the raw numbers over serial and analyze them in a spreadsheet or Python 
 <InArticleAd />
 
 
-A well-designed topic hierarchy makes your IoT system scalable, queryable, and maintainable. The general pattern follows a location-to-sensor path:
+With one device, any topic name works. With a hundred, a careless name means you cannot ask for "all temperatures" or "everything in this building" without listing every device. A good topic is a path from the place to the measurement:
 
 ```
 site / building / floor / room / device / measurement
@@ -1194,7 +1195,7 @@ factory/plant-1/line-3/plc-01/cycle_count
 ### Design Principles
 
 <Steps>
-1. **Start general, end specific.** The leftmost segments are the broadest categories (site, building). The rightmost segment is the measurement type. This lets you subscribe to `office/hq/#` to get everything in a building, or `+/+/+/+/+/temperature` to get all temperature readings across all sites.
+1. **Start general, end specific.** The leftmost segments are the broadest categories (site, building). The rightmost segment is the measurement type. A subscriber can then use two wildcards: `#` stands for all levels that follow, and `+` stands for exactly one level. So `office/hq/#` gives everything in a building, and `+/+/+/+/+/temperature` gives all temperature readings across all sites.
 
 2. **Use lowercase and hyphens.** Topics are case-sensitive in MQTT. Stick to lowercase with hyphens for consistency: `server-room` not `ServerRoom` or `server_room`.
 
@@ -1202,7 +1203,7 @@ factory/plant-1/line-3/plc-01/cycle_count
 
 4. **Avoid leading or trailing slashes.** The topic `/site/building/sensor` creates an empty first level. Use `site/building/sensor` instead.
 
-5. **Reserve system topics.** Use a prefix like `$SYS/` or `cmd/` for control messages. For example, `cmd/esp32-01/config` for configuration updates and `status/esp32-01/online` for health monitoring.
+5. **Reserve system topics.** Use a prefix like `cmd/` for control messages, and do not publish under `$SYS/`, which brokers keep for their own statistics. For example, `cmd/esp32-01/config` for configuration updates and `status/esp32-01/online` for health monitoring.
 
 6. **Plan for wildcards.** Think about how subscribers will query data. If a dashboard needs all sensors in a room, the hierarchy should group by room. If analytics needs all temperature readings, the hierarchy should end with the measurement type.
 </Steps>
@@ -1312,7 +1313,7 @@ In practice, most IoT systems use MQTT as the primary protocol for device-to-bro
 <InArticleAd />
 
 
-To run the protocol bench, you need a local MQTT broker. Mosquitto is the standard open-source broker. Lesson 2 covers a full production setup with TLS and ACLs; here we set up a minimal instance for testing.
+To run the protocol bench, you need a local MQTT broker. Mosquitto is the standard open-source broker. The setup here is the smallest one that works, for testing only: it accepts anyone and encrypts nothing. The lesson on [the secure broker setup](/education/iot-systems/mqtt-broker-setup-secure-connection/) adds passwords, topic permissions and TLS.
 
 <Tabs>
 <TabItem label="Linux (apt)">
@@ -1427,21 +1428,19 @@ After running 100 iterations on a local network (ESP32 on the same Wi-Fi as the 
 
 | Metric | MQTT (QoS 0) | CoAP (CON) | HTTP POST |
 |--------|--------------|------------|-----------|
-| Payload size | 128 bytes | 128 bytes | 128 bytes |
-| Wire overhead | ~35 bytes | ~29 bytes | ~350 bytes |
+| Payload size | 120 bytes | 120 bytes | 120 bytes |
+| Wire overhead | ~33 bytes | ~30 bytes | ~350 bytes |
 | Mean RTT | 1.5 ms | 3.0 ms | 25 ms |
 | P95 RTT | 4 ms | 8 ms | 45 ms |
 | Connection setup | 0 ms (reused) | 0 ms (UDP) | 5-10 ms (TCP) |
 | TLS addition | 0 ms (done once) | Per session | Per request |
-
-Your numbers will differ based on network conditions, server load, and ESP32 variant, but the relative relationships are consistent across environments.
 
 ## Exercises
 
 <InArticleAd />
 
 
-1. **Add MQTT QoS 1 to the benchmark.** Modify the MQTT bench function to publish with QoS 1 (`mqttClient.publish(topic, payload, true)` for retained, or set QoS in PubSubClient). QoS 1 requires a PUBACK from the broker before the publish is considered complete. Measure how the RTT changes compared to QoS 0. Then try QoS 2 (exactly once) if your client library supports it. Document the latency increase at each QoS level and explain why.
+1. **Add MQTT QoS 1 to the benchmark.** PubSubClient can publish only at QoS 0 (the third argument of `mqttClient.publish(topic, payload, true)` sets the retained flag, not the QoS), so change the MQTT bench function to a client library that can publish at QoS 1, such as the ESP-IDF `esp-mqtt` client. QoS 1 requires a PUBACK from the broker before the publish is considered complete. Measure how the RTT changes compared to QoS 0. Then try QoS 2 (exactly once) if your client library supports it. Document the latency increase at each QoS level and explain why.
 
 2. **Implement CoAP Observe.** Instead of repeatedly sending POST requests, modify the CoAP implementation to support the Observe option (option number 6). Register an observer from a Python client using `aiocoap-client observe coap://[esp32-ip]:5683/sensor/bme280`, and have the ESP32 act as a CoAP server that pushes new readings to all registered observers whenever the sensor data changes by more than 0.5 degrees. Compare the bandwidth usage of observe-based push versus repeated POST requests over a 10-minute window.
 
@@ -1454,7 +1453,11 @@ Your numbers will differ based on network conditions, server load, and ESP32 var
 <InArticleAd />
 
 
-You examined four IoT network architectures (star, mesh, gateway, edge/fog) and learned when each one fits. You studied the three dominant IoT protocols, MQTT, CoAP, and HTTP, understanding their transport layers, overhead, and trade-offs. You implemented all three protocols on the same ESP32 with the same BME280 sensor and built a combined benchmark that measures payload size, wire overhead, and round-trip time side by side. The results confirmed that MQTT offers the best balance of low latency and reliability for connected devices, CoAP provides the lowest overhead for constrained devices and lossy networks, and HTTP is best reserved for infrequent uploads and web API integration. You designed MQTT topic hierarchies following the site/building/floor/room/device/sensor pattern and structured JSON payloads with consistent field naming. You set up a local Mosquitto broker and two Python servers (CoAP and HTTP) for testing, and learned how SiliconWit.io supports all three protocols as a managed alternative.
+- An IoT network has one of four shapes: star, mesh, gateway or edge. In all of them, fast control and safety limits stay in the device.
+- The same 120-byte reading cost about 33 extra bytes with MQTT, 30 with CoAP and 350 with HTTP.
+- MQTT suits a device that stays connected and sends often. CoAP suits a very small device that sleeps between readings. HTTP suits rare uploads to a web service.
+- A send that returns OK is not proof of arrival. MQTT at QoS 0 confirms nothing. A CoAP ACK and an HTTP status code confirm that the server received the message.
+- A topic goes from general to specific (`site/building/floor/room/device/measurement`), and every device uses the same JSON field names with the unit in the name.
 
 <IoTSystemsComments />
 

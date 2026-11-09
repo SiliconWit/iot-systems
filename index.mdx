@@ -60,42 +60,42 @@ Each lesson follows a consistent cycle:
 
 <CardGrid>
   <Card title="Lesson 1: IoT Architecture and Protocol Comparison" icon="star">
-    [IoT Architecture and Protocol Comparison](./iot-architecture-protocol-comparison). Survey IoT system architectures and compare MQTT, CoAP, and HTTP side by side. Send the same BME280 sensor data over all three protocols and measure bandwidth, latency, and power consumption.
+    [IoT Architecture and Protocol Comparison](/education/iot-systems/iot-architecture-protocol-comparison/). Survey IoT system architectures and compare MQTT, CoAP, and HTTP side by side. Send the same BME280 sensor data over all three protocols and measure bandwidth, latency, and power consumption.
     **Build:** Protocol comparison bench on ESP32. **Parts:** ESP32, BME280 (reuse).
   </Card>
 
   <Card title="Lesson 2: MQTT Broker Setup and Secure Connections" icon="document">
-    [MQTT Broker Setup and Secure Connections](./mqtt-broker-setup-secure-connection). Install and configure Mosquitto with TLS, password authentication, and topic ACLs. Connect to both your self-hosted broker and the SiliconWit.io connected operations platform. Understand retained messages, last will, QoS levels, and persistence.
+    [MQTT Broker Setup and Secure Connections](/education/iot-systems/mqtt-broker-setup-secure-connection/). Install and configure Mosquitto with TLS, password authentication, and topic ACLs. Connect to both your self-hosted broker and the SiliconWit.io connected operations platform. Understand retained messages, last will, QoS levels, and persistence.
     **Build:** Production-ready Mosquitto broker with TLS. **Parts:** Raspberry Pi or any Linux machine.
   </Card>
 
   <Card title="Lesson 3: MQTT Clients on ESP32, Pico, and STM32" icon="document">
-    [MQTT Clients on ESP32, Pico, and STM32](./mqtt-clients-esp32-pico-stm32). Write standard MQTT client firmware for three different MCU platforms. Design a consistent topic hierarchy, handle reconnection gracefully, and publish structured JSON payloads with QoS 1.
+    [MQTT Clients on ESP32, Pico, and STM32](/education/iot-systems/mqtt-clients-esp32-pico-stm32/). Write standard MQTT client firmware for three different MCU platforms. Design a consistent topic hierarchy, handle reconnection gracefully, and publish structured JSON payloads with QoS 1.
     **Build:** Three-MCU sensor network publishing to one broker. **Parts:** ESP32, RPi Pico W, STM32 + ESP01 (reuse).
   </Card>
 
   <Card title="Lesson 4: Real-Time Dashboards and Data Visualization" icon="document">
-    [Real-Time Dashboards and Data Visualization](./realtime-dashboards-data-visualization). Store MQTT data in InfluxDB via Telegraf, build Grafana dashboards with live charts and gauges, and explore the SiliconWit.io dashboard as a managed alternative. Query historical data and export reports.
+    [Real-Time Dashboards and Data Visualization](/education/iot-systems/realtime-dashboards-data-visualization/). Store MQTT data in InfluxDB via Telegraf, build Grafana dashboards with live charts and gauges, and explore the SiliconWit.io dashboard as a managed alternative. Query historical data and export reports.
     **Build:** Grafana dashboard with live sensor data. **Parts:** No new hardware.
   </Card>
 
   <Card title="Lesson 5: REST APIs, Webhooks, and Device Integration" icon="document">
-    [REST APIs, Webhooks, and Device Integration](./rest-api-webhook-device-integration). Design RESTful APIs for device management and data retrieval. Implement webhook endpoints that receive real-time push notifications, validate payloads with HMAC signatures, and integrate with external services.
+    [REST APIs, Webhooks, and Device Integration](/education/iot-systems/rest-api-webhook-device-integration/). Design RESTful APIs for device management and data retrieval. Implement webhook endpoints that receive real-time push notifications, validate payloads with HMAC signatures, and integrate with external services.
     **Build:** REST API server with webhook receiver. **Parts:** No new hardware.
   </Card>
 
   <Card title="Lesson 6: Alerts, Automation, and Rule Engines" icon="document">
-    [Alerts, Automation, and Rule Engines](./alerts-automation-rule-engines). Configure threshold alerts that notify via email, SMS, Discord, Slack, and Telegram. Build automation flows with Node-RED that trigger actions based on sensor data. Compare self-hosted rule engines with the SiliconWit.io alert system.
+    [Alerts, Automation, and Rule Engines](/education/iot-systems/alerts-automation-rule-engines/). Configure threshold alerts that notify via email, SMS, Discord, Slack, and Telegram. Build automation flows with Node-RED that trigger actions based on sensor data. Compare self-hosted rule engines with the SiliconWit.io alert system.
     **Build:** Multi-channel alert system with automation flows. **Parts:** No new hardware.
   </Card>
 
   <Card title="Lesson 7: Device Security, TLS, and Provisioning" icon="document">
-    [Device Security, TLS, and Provisioning](./device-security-tls-provisioning). Generate and deploy X.509 certificates for mutual TLS authentication. Implement device identity and provisioning workflows. Secure firmware updates with signed images. Audit your IoT deployment against common attack vectors.
+    [Device Security, TLS, and Provisioning](/education/iot-systems/device-security-tls-provisioning/). Generate and deploy X.509 certificates for mutual TLS authentication. Implement device identity and provisioning workflows. Secure firmware updates with signed images. Audit your IoT deployment against common attack vectors.
     **Build:** Mutual TLS connection with certificate provisioning. **Parts:** ESP32 (reuse).
   </Card>
 
   <Card title="Lesson 8: Production IoT Monitoring System" icon="rocket">
-    [Production IoT Monitoring System](./production-iot-monitoring-system). Combine everything from this course into a complete production system. Deploy multiple sensor nodes, a broker with TLS, a time-series database, live dashboards, automated alerts, and cloud forwarding. Handle node failures, broker restarts, and network outages gracefully.
+    [Production IoT Monitoring System](/education/iot-systems/production-iot-monitoring-system/). Combine everything from this course into a complete production system. Deploy multiple sensor nodes, a broker with TLS, a time-series database, live dashboards, automated alerts, and cloud forwarding. Handle node failures, broker restarts, and network outages gracefully.
     **Build:** Complete production IoT monitoring system. **Parts:** All reused from prior lessons.
   </Card>
 </CardGrid>

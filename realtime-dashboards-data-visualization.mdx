@@ -25,12 +25,12 @@ import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/sta
 
 import IoTSystemsComments from '../../../../components/iot-systems/IoTSystemsComments.astro';
 
-Sensor data flowing through an MQTT broker vanishes the moment it is consumed. Without persistent storage, you cannot see trends, detect slow drift, or prove that a temperature spike happened last Tuesday at 3 AM. Dashboards without a time-series database behind them show only the present, and raw database queries show only numbers. You need both: a pipeline that stores every reading with a timestamp and a visualization layer that turns those readings into charts, gauges, and alerts a human can act on. In this lesson you will build that pipeline using Telegraf, InfluxDB, and Grafana (the TIG stack), compare it with the managed dashboards on SiliconWit.io, and build a lightweight Chart.js alternative for resource-constrained gateways. #Dashboard #Grafana #DataViz
+A customer says the cold room was too warm last Tuesday at 3 in the morning. Your sensor measured it and published it, and you still cannot answer, because an MQTT broker passes a message on and keeps no history. Without stored readings you cannot show a trend, see a slow drift, or prove what happened. In this lesson you build the missing part with three tools, Telegraf, InfluxDB and Grafana: one collects every reading, one stores it with its time, and one draws charts that a person can read at a glance. You also compare this with the managed dashboards on SiliconWit.io and build a very small web dashboard with Chart.js. #Dashboard #Grafana #DataViz
 
 ## The MQTT-to-Dashboard Pipeline
 
 <Card title="What We Are Building" icon="star">
-A real-time visualization system that subscribes to all sensor topics on your MQTT broker, stores every reading in a time-series database, and renders live dashboards with line charts, gauges, stat panels, tables, and alert indicators. No new hardware is needed. Everything runs on the same Linux machine (or Raspberry Pi) where your Mosquitto broker is already running from Lesson 2.
+A system that subscribes to all sensor topics on your MQTT broker, stores every reading in a time-series database (a database built for values with a time), and shows live dashboards with line charts, gauges, tables and alert indicators. No new hardware is needed. Everything runs on the Linux machine or Raspberry Pi where your Mosquitto broker already runs.
 </Card>
 
 The pipeline has four stages, each handled by a dedicated tool:
@@ -43,55 +43,36 @@ The pipeline has four stages, each handled by a dedicated tool:
 | 4. Visualization | Grafana | Queries InfluxDB and renders interactive dashboards with panels, thresholds, and alerts |
 
 ```text
-  TIG Stack Data Flow
-  ──────────────────────────────────────────
   Sensor ──► Mosquitto ──► Telegraf ──► InfluxDB
-  (MQTT       (broker)    (MQTT sub     (time-
-   publish)               + parser)     series DB)
-                                           │
-                                           │ Flux
-                                           │ query
-                                           ▼
-                                        Grafana
-                                        (panels:
-                                         line chart,
-                                         gauge,
-                                         table,
-                                         alerts)
-
-  Each component is independent. If Grafana
-  goes down, data keeps flowing into InfluxDB.
+  publishes   passes on    subscribes,   stores each
+  a reading   (keeps no    reads the     value with
+              history)     JSON          its time
+                                            ▲
+                                            │ asks every
+                                            │ few seconds
+                                         Grafana
+                                         draws charts,
+                                         gauges, tables
 ```
 
-Data flows in one direction: sensor publishes to Mosquitto, Telegraf consumes the message, writes it to InfluxDB, and Grafana queries InfluxDB on a refresh interval (typically every 5 seconds). Each component is independent. If Grafana goes down, data keeps flowing into InfluxDB. If Telegraf restarts, it reconnects to the broker and resumes ingestion.
+Data flows in one direction, from the sensor to the database. Grafana does not receive messages. It asks InfluxDB again at a fixed refresh interval (5 seconds here), so a panel shows the last stored value, not the sensor itself.
+
+The parts are independent, and that decides what a failure costs:
+
+- If Grafana stops, the data still goes into InfluxDB. Nothing is lost.
+- If Telegraf stops, it reconnects to the broker when it returns, but with the settings in this lesson the readings published in between are not stored. The chart has a gap.
+
+The dashboard is for people who watch and decide. A limit that protects equipment must act in the device, which works when this whole chain is down.
 
 ## Installing the TIG Stack
 
 <InArticleAd />
 
 
-You can install all four components (Mosquitto + Telegraf + InfluxDB + Grafana) either through system packages or through Docker Compose. Docker is the recommended approach because it isolates each service, makes upgrades trivial, and produces the same environment on any Linux distribution.
-
-```text
-  Grafana Dashboard Panel Layout
-  ──────────────────────────────────────────
-  ┌──────────────────────────────────────┐
-  │ Temperature (Line Chart)             │
-  │  30C ─────────╱╲──────────           │
-  │  25C ────────╱──╲─────────           │
-  │  20C ───────╱────╲────────           │
-  │       0h    6h   12h   18h   24h     │
-  ├──────────────┬───────────────────────┤
-  │  Humidity    │  Pressure  │ Status   │
-  │  ┌─────┐    │  1013 hPa  │ Node 1 ✓│
-  │  │ 65% │    │  ┌──────┐  │ Node 2 ✓│
-  │  │gauge│    │  │ stat  │  │ Node 3 ✗│
-  │  └─────┘    │  └──────┘  │          │
-  └──────────────┴───────────┴──────────┘
-```
+You can install the four programs (Mosquitto, Telegraf, InfluxDB, Grafana) as system packages or with Docker Compose. Docker runs each program in its own container, a sealed box with everything the program needs. This lesson recommends it, because the four programs cannot disturb each other and the setup is the same on any Linux system.
 
 :::tip[Podman works too]
-[Podman](https://podman.io) is fully open source (Apache 2.0, no paid tiers), runs rootless by default, and needs no background daemon. Most Compose files in this lesson work with `podman-compose`, though you may need minor adjustments for inter-container networking. Test with `podman-compose up` before relying on it in production.
+[Podman](https://podman.io) is open source (Apache 2.0), runs without root rights and needs no background service. Most Compose files in this lesson work with `podman-compose`, but networking between containers may need small changes. Test with `podman-compose up` first.
 :::
 
 <Tabs>
@@ -110,7 +91,7 @@ sudo usermod -aG docker $USER
 
 ### Docker Compose File
 
-Create a project directory and add the following `docker-compose.yml`:
+Create a project directory and add the following `docker-compose.yml`. It describes four services. For each one, notice the image (which program), the ports opened to your machine, and the volumes (folders that keep the data when a container is replaced). The passwords and the token in it are examples: change them before any real use.
 
 ```yaml title="docker-compose.yml"
 version: "3.8"
@@ -193,7 +174,7 @@ log_dest file /mosquitto/log/mosquitto.log
 ```
 
 :::note
-This configuration allows anonymous connections for development. In Lesson 2 you configured password authentication and TLS. For a production setup, add those settings here and mount your certificate files into the container.
+This configuration accepts anyone, for development only. For real use, add the passwords, topic permissions and TLS from [the secure broker setup](/education/iot-systems/mqtt-broker-setup-secure-connection/) and mount your certificate files into the container.
 :::
 
 ### Start the Stack
@@ -286,7 +267,7 @@ sudo systemctl status mosquitto influxdb telegraf grafana-server
 <InArticleAd />
 
 
-Telegraf is the glue between your MQTT broker and InfluxDB. It subscribes to MQTT topics, parses the incoming JSON payloads, and writes structured measurements to InfluxDB. The entire behavior is controlled by a single configuration file.
+InfluxDB does not speak MQTT, and Mosquitto does not write to databases. Telegraf stands between them: it subscribes to MQTT topics, reads the JSON in each message, and writes the values to InfluxDB. One configuration file controls all of it.
 
 ### Telegraf Configuration File
 
@@ -332,9 +313,9 @@ mkdir -p telegraf
   # Parse JSON payloads
   data_format = "json"
 
-  # Use the MQTT topic as the measurement name
-  # For topic "sensors/esp32-01/bme280", the measurement becomes "mqtt_consumer"
-  # and we extract tags from the topic path
+  # Without topic parsing, every message lands in the measurement "mqtt_consumer".
+  # With the rules below, topic "sensors/esp32-01/bme280" gives the measurement
+  # "sensors", and the tags come from the rest of the topic path
   [[inputs.mqtt_consumer.topic_parsing]]
     topic = "sensors/+/+"
     measurement = "measurement/_/_"
@@ -429,9 +410,13 @@ The configuration has three main sections:
 
 **Output plugin.** The `influxdb_v2` output sends data to InfluxDB 2.x. The `token` authenticates the connection. The `organization` and `bucket` specify where data lands. In Docker, the URL uses the container name (`influxdb`) instead of `localhost` because Docker Compose creates an internal network.
 
-**Input plugin.** The `mqtt_consumer` subscribes to the specified topics with QoS 1. The `data_format = "json"` tells Telegraf to parse each MQTT payload as JSON. Every key in the JSON object becomes a field in InfluxDB.
+**Input plugin.** The `mqtt_consumer` subscribes to the listed topics with QoS 1. The `data_format = "json"` tells Telegraf to read each MQTT payload as JSON. Every numeric key in the JSON becomes a field in InfluxDB.
 
-**Topic parsing.** This is the most powerful part. Without topic parsing, every MQTT message lands in a single measurement called `mqtt_consumer` with no device or location tags. The `topic_parsing` blocks extract structured tags from the topic hierarchy. For example, a message on `sensors/esp32-01/bme280` creates a measurement named `sensors` with tags `device=esp32-01` and `sensor_type=bme280`. This makes it possible to filter and group data by device or sensor type in Grafana.
+QoS 1 here covers one step: from the broker to Telegraf, while Telegraf is connected. With `persistent_session = false` the broker keeps nothing for Telegraf while it is away, so readings published during a Telegraf restart never reach the database. To close that gap, set `persistent_session = true` and keep the fixed `client_id`, and let the devices publish with QoS 1.
+
+**Topic parsing.** A JSON payload says "temperature 24.5" but not which device measured it. That information is in the topic. Without topic parsing, every message goes into one measurement called `mqtt_consumer` with no device or location. The `topic_parsing` blocks take labels from the levels of the topic. A message on `sensors/esp32-01/bme280` goes into a measurement named `sensors` with the tags `device=esp32-01` and `sensor_type=bme280`. Then Grafana can filter and group by device.
+
+Each pattern here has three levels, and a `+` stands for exactly one level. A topic with another number of levels, such as the five-level topics of the three-node network, matches no pattern and goes into `mqtt_consumer`. Such topics need their own `topic_parsing` block with five levels.
 
 ### Verify Data Ingestion
 
@@ -452,26 +437,26 @@ influx query '
 ' --org siliconwit --token my-super-secret-token
 ```
 
-You should see one row with `temperature`, `humidity`, and `pressure` fields, tagged with `device=esp32-test` and `sensor_type=bme280`.
+You should see one row for each of the `temperature`, `humidity`, and `pressure` fields, tagged with `device=esp32-test` and `sensor_type=bme280`. With the Docker setup the `influx` tool is inside the container, so put `docker exec influxdb` in front of the command.
 
 ## InfluxDB Fundamentals
 
 <InArticleAd />
 
 
-Before building dashboards, you need to understand how InfluxDB organizes data. InfluxDB 2.x uses a different data model than traditional relational databases.
+Every panel you build is a question to InfluxDB, so you need to know how it files the data. Think of a logbook: each line has a time, some labels that say where the line comes from, and the values that were read.
 
 ### Core Concepts
 
-**Bucket.** A bucket is where time-series data is stored. It is similar to a database in SQL terms. Each bucket has a retention policy that automatically deletes data older than a specified duration. Our `iot_sensors` bucket retains data for 30 days.
+**Bucket.** A bucket is the logbook itself, the place where the data is stored. Each bucket has a retention period and deletes data older than that by itself. The `iot_sensors` bucket keeps data for 30 days.
 
-**Measurement.** A measurement is analogous to a table. Each measurement holds data points that share the same name. With our Telegraf topic parsing, the measurement name comes from the first segment of the MQTT topic (e.g., `sensors`, `home`, `factory`).
+**Measurement.** A measurement is a named group of data points, like a table in other databases. With the Telegraf topic parsing above, the name is the first level of the MQTT topic (`sensors`, `home`, `factory`).
 
-**Tags.** Tags are indexed key-value pairs used for filtering and grouping. They describe metadata about the data point: which device sent it, which location it came from, what type of sensor produced it. Tags are strings and are always indexed, making tag-based queries fast.
+**Tags.** Tags are the labels: which device, which location, which type of sensor. They are text, and InfluxDB keeps an index of them (a list for fast lookup), so a search by tag is fast.
 
-**Fields.** Fields hold the actual measured values: temperature, humidity, pressure, voltage. Fields are not indexed, which means filtering by field value requires scanning all matching data points. Fields can be floats, integers, strings, or booleans.
+**Fields.** Fields are the measured values: temperature, humidity, pressure, voltage. They have no index, so a search by field value must read every point.
 
-**Timestamp.** Every data point has a nanosecond-precision timestamp. If the MQTT payload does not include a timestamp, Telegraf stamps it with the current time when the message arrives.
+**Timestamp.** Every data point has a time, stored to the nanosecond. If the MQTT payload contains no time, Telegraf uses the time at which the message arrived.
 
 ### Tags vs Fields: When to Use Each
 
@@ -487,7 +472,7 @@ The rule of thumb: if you will filter or group by it, make it a tag. If you will
 
 ### Retention Policies
 
-Retention policies control how long data is kept. For IoT, a common pattern is to keep raw data for a short period and downsampled data for longer:
+A device that reports every 10 seconds makes 8,640 points per value per day, and a disk fills. The retention period controls how long data is kept. A common pattern keeps the raw data for a short time and keeps averages for longer. Replacing raw data with averages is called downsampling.
 
 | Bucket | Retention | Resolution | Purpose |
 |--------|-----------|------------|---------|
@@ -531,7 +516,9 @@ from(bucket: "iot_sensors")
   |> aggregateWindow(every: 5m, fn: mean, createEmpty: false)
 ```
 
-The `aggregateWindow` function groups data points into 5-minute buckets and applies the `mean` function to each bucket. Setting `createEmpty: false` prevents empty windows from appearing in the output when no data was received during that interval.
+The `aggregateWindow` function cuts the time into 5-minute windows and replaces the points in each window with their mean. Setting `createEmpty: false` leaves out a window in which no data arrived.
+
+A mean hides short events. One reading of 55 °C among 29 readings of 25 °C gives a mean of 26 °C. Where the peak matters, use `fn: max`.
 
 #### Comparing Multiple Devices
 
@@ -549,7 +536,7 @@ By removing the device filter, this query returns temperature data from all devi
 
 #### Detecting Anomalies
 
-A simple anomaly detection query that flags readings outside a normal range:
+This query keeps only the readings outside a normal range:
 
 ```flux title="Detect temperature readings above threshold"
 from(bucket: "iot_sensors")
@@ -582,7 +569,7 @@ This task runs every 10 minutes, reads the last 10 minutes of raw data, computes
 <InArticleAd />
 
 
-Grafana is the visualization layer. It connects to InfluxDB, runs Flux queries, and renders the results as interactive panels on a dashboard.
+Grafana draws the data. It connects to InfluxDB, runs Flux queries, and shows each result as a panel on a dashboard.
 
 ### Add InfluxDB as a Data Source
 
@@ -635,7 +622,7 @@ Click the refresh interval dropdown in the top-right corner of the dashboard and
 <InArticleAd />
 
 
-A well-designed IoT dashboard uses different panel types for different purposes. Here are the five most useful panel types for sensor data.
+Each panel type answers a different question. These five are the most useful for sensor data.
 
 ### 1. Time Series (Line Chart)
 
@@ -674,7 +661,7 @@ from(bucket: "iot_sensors")
   |> last()
 ```
 
-The `last()` function returns only the most recent data point.
+The `last()` function returns only the newest stored point in the range. If the sensor stopped three minutes ago, the gauge still shows its last value until that value is older than the 5-minute range. A gauge shows what was last stored, not what is true now.
 
 **Panel settings:**
 - Title: "Humidity"
@@ -735,27 +722,37 @@ An alert list panel shows the current state of all configured alerts. It provide
 - State filter: Alerting, Pending
 - Sort by: Time (newest first)
 
-We will configure the actual alert rules in Lesson 6. For now, you can add this panel as a placeholder so the dashboard layout is ready.
+The alert rules themselves are the subject of the lesson on [alerts and automation](/education/iot-systems/alerts-automation-rule-engines/). For now, add this panel as a placeholder so the layout is ready.
 
 ## Example Dashboard Layout
 
 <InArticleAd />
 
 
-Here is a recommended layout for an IoT sensor dashboard. Arrange the panels in a grid:
+Put the answer to the first question ("is everything normal now?") at the top, the history below it, and the details last:
 
-| Row | Left Panel | Center Panel | Right Panel |
-|-----|-----------|-------------|------------|
-| 1 | Stat: Temperature Now | Stat: Humidity Now | Stat: Pressure Now |
-| 2 | Time Series: Temperature (full width, spanning all three columns) | | |
-| 3 | Gauge: Humidity | Gauge: Battery | Alert List |
-| 4 | Table: Recent Readings (full width) | | |
+```text
+  ┌────────────┬────────────┬────────────┐
+  │ Stat:      │ Stat:      │ Stat:      │
+  │ 27.3 °C    │ 58 %       │ 1013 hPa   │
+  ├────────────┴────────────┴────────────┤
+  │ Time series: temperature             │
+  │  30 ─────────╱╲──────────            │
+  │  25 ────────╱──╲─────────            │
+  │  20 ───────╱────╲────────            │
+  ├────────────┬────────────┬────────────┤
+  │ Gauge:     │ Gauge:     │ Alert list │
+  │ humidity   │ battery    │            │
+  ├────────────┴────────────┴────────────┤
+  │ Table: recent readings               │
+  └──────────────────────────────────────┘
+```
 
 To make a panel span the full width, drag its right edge to the edge of the dashboard. Grafana uses a 24-column grid, so a full-width panel is 24 units wide.
 
 ### Adding Threshold Lines to Time Series
 
-Threshold lines on a time series chart make it immediately obvious when values enter a danger zone:
+Threshold lines show at once when a value leaves the acceptable range:
 
 <Steps>
 1. Edit the Temperature time series panel.
@@ -766,7 +763,7 @@ Threshold lines on a time series chart make it immediately obvious when values e
 6. Click **Apply**.
 </Steps>
 
-The chart now shows horizontal lines at 40 and 5 degrees. Any data points above or below these lines stand out visually.
+The chart now shows horizontal lines at 40 and 5 degrees.
 
 ### Device Grouping with Template Variables
 
@@ -795,12 +792,12 @@ Now update your panel queries to use the variable:
 from(bucket: "iot_sensors")
   |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
   |> filter(fn: (r) => r["_measurement"] == "sensors")
-  |> filter(fn: (r) => r["device"] == "${device}")
+  |> filter(fn: (r) => r["device"] =~ /^${device:regex}$/)
   |> filter(fn: (r) => r["_field"] == "temperature")
   |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)
 ```
 
-A dropdown appears at the top of the dashboard. Selecting a device filters all panels instantly.
+A dropdown appears at the top of the dashboard. Selecting a device filters all panels instantly. The query uses a regular expression match (`=~`) because the variable can hold several devices, or all of them, at the same time.
 
 ## SiliconWit.io Dashboard Comparison
 
@@ -820,7 +817,7 @@ Your MQTT clients connect to SiliconWit.io's MQTT endpoint (or your own broker w
 | Storage | You manage InfluxDB | Managed by platform |
 | Visualization | Grafana (full customization) | Built-in live charts, tables, reports |
 | Data export | Flux queries, CSV, API | CSV download, API queries, scheduled reports |
-| Alerts | Configure in Lesson 6 | Built-in threshold alerts |
+| Alerts | You write the Grafana alert rules | Built-in threshold alerts |
 | Cost | Free (self-hosted hardware cost) | Free tier for 3 devices |
 | Customization | Unlimited | Predefined panel types |
 | Maintenance | OS updates, backups, disk space | None |
@@ -839,27 +836,22 @@ The SiliconWit.io dashboard provides:
 
 ### When to Use Each Approach
 
-Use SiliconWit.io when:
-- You want dashboards running in under 5 minutes
-- You do not have a dedicated Linux server
-- You are prototyping or building a small deployment (under 10 devices)
-- You want built-in alerting without configuring Grafana alert rules
+Use SiliconWit.io when you have no Linux server to look after, when the deployment is small, or when you want alerts without writing Grafana rules.
 
 Use the self-hosted TIG stack when:
-- You need full control over data storage and retention
-- You have specific compliance or data sovereignty requirements
-- You want custom Grafana plugins or advanced visualization
-- You are building a large-scale deployment with dozens of devices
-- You need to integrate with internal systems that cannot reach the public internet
+- You need full control over where the data is stored and for how long
+- Rules or contracts say that the data must stay on your own systems
+- You want custom Grafana plugins or special charts
+- The system must work with internal systems that cannot reach the public internet
 
-You can also use both: self-hosted Grafana for detailed engineering analysis and SiliconWit.io for stakeholder-facing dashboards that require no maintenance.
+You can also use both: your own Grafana for detailed engineering analysis and SiliconWit.io for the people who only need to see the state.
 
 ## Lightweight Dashboard with Chart.js
 
 <InArticleAd />
 
 
-Not every IoT gateway has the resources to run Grafana. A Raspberry Pi Zero or an OpenWrt router can serve a simple web dashboard using Chart.js, a lightweight JavaScript charting library that runs entirely in the browser. This is useful for local monitoring when you need a quick visual without cloud connectivity.
+Some gateways are too small to run Grafana. A Raspberry Pi Zero or an OpenWrt router can still serve a simple web page that draws charts with Chart.js, a small JavaScript library that runs in the browser. The page connects to the broker itself and draws each message as it arrives. It stores nothing: reload the page and the history is gone. Use it for a quick local view with no internet.
 
 ### Project Structure
 
@@ -871,6 +863,8 @@ iot-dashboard/
 ```
 
 ### HTML Page
+
+The page loads two libraries (Chart.js and an MQTT client for browsers) and holds the empty places for the number cards and the charts.
 
 ```html title="index.html"
 <!DOCTYPE html>
@@ -914,6 +908,8 @@ iot-dashboard/
 ```
 
 ### CSS Styling
+
+The style sheet only sets colours and the grid. It has no effect on the data.
 
 ```css title="style.css"
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -970,6 +966,8 @@ h1 {
 ```
 
 ### JavaScript Application
+
+The script has three parts: it creates the two charts, it connects to the broker over a WebSocket and subscribes to `sensors/#`, and for each message it reads the JSON and adds a point. Notice `addDataPoint`: it removes the oldest point when a chart has more than 60, so the page does not grow without limit.
 
 ```javascript title="app.js"
 // Configuration
@@ -1150,14 +1148,14 @@ cd iot-dashboard
 python3 -m http.server 8080
 ```
 
-Open `http://localhost:8080` in a browser. As MQTT messages arrive, the stat cards update and the charts scroll with live data. This entire dashboard is three files totaling under 5 KB (excluding the CDN-loaded libraries).
+Open `http://localhost:8080` in a browser. As MQTT messages arrive, the stat cards update and the charts scroll with live data. This entire dashboard is three files totaling under 6 KB (excluding the CDN-loaded libraries).
 
 ## Data Export
 
 <InArticleAd />
 
 
-Dashboards are great for real-time monitoring, but you often need to extract data for analysis, reporting, or archival purposes.
+A dashboard is for watching. For a report, an analysis in a spreadsheet or an archive, you take the data out.
 
 ### CSV Export from Grafana
 
@@ -1244,11 +1242,11 @@ For automated weekly or daily reports, create a cron job that runs the export sc
 <InArticleAd />
 
 
-Building a dashboard that is actually useful (not just pretty) requires attention to design principles. Here are the practices that matter most for IoT dashboards.
+A dashboard is useful when an operator can see in a few seconds whether something needs attention. These practices help most.
 
 ### Use Meaningful Colors
 
-Colors should communicate status, not decoration. Adopt a consistent color scheme:
+A colour must mean a state. Use one scheme everywhere:
 
 | Color | Meaning | Example |
 |-------|---------|---------|
@@ -1262,11 +1260,13 @@ Apply the same color mapping across all panels. If red means "above threshold" o
 
 ### Add Threshold Lines
 
-Threshold lines on time series charts provide visual context. A temperature reading of 38 C means nothing without knowing whether the acceptable range is 0 to 100 or 20 to 40. Add threshold lines at the boundaries of your acceptable range so operators can instantly see if values are trending toward a problem.
+A reading of 38 C means nothing until you know whether the acceptable range is 0 to 100 or 20 to 40. Threshold lines at the edges of the acceptable range let an operator see that a value is moving toward a problem.
+
+A threshold line informs a person. It does not protect anything. The limit that switches a heater off or stops a pump belongs in the device, and the line on the chart shows the same value so that people can see how close the process is.
 
 ### Group by Device or Location
 
-Organize panels by physical grouping, not by metric type. An operator monitoring a greenhouse cares about "Greenhouse A: temperature, humidity, soil moisture" together, not "All temperatures from all locations" on one panel. Use Grafana rows or separate dashboard pages for each logical group.
+Group panels by place, not by type of value. An operator of a greenhouse wants "Greenhouse A: temperature, humidity, soil moisture" together, not all temperatures of all sites on one panel. Use Grafana rows or one page for each group.
 
 ### Keep It Responsive
 
@@ -1279,20 +1279,20 @@ Grafana dashboards should work on tablets and phones for on-the-go monitoring:
 
 ### Avoid Dashboard Overload
 
-A dashboard with 30 panels showing every possible metric is worse than useless because nobody reads it. Follow the "3 to 7 panels" rule for any single dashboard page:
+Nobody reads a dashboard with 30 panels. Keep any single page to 3 to 7 panels:
 
 - **Overview dashboard:** 3 to 5 stat panels showing system health at a glance
 - **Device detail dashboard:** 5 to 7 panels for a single device (accessed by clicking through from the overview)
 - **Diagnostic dashboard:** Tables and raw queries for troubleshooting (not for daily monitoring)
 
-Link dashboards together using Grafana's drill-down links so operators can go from a high-level overview to device details in one click.
+Link the pages, so an operator goes from the overview to one device in one click.
 
 ## Putting It All Together
 
 <InArticleAd />
 
 
-Let us trace a single sensor reading through the entire pipeline to verify everything works end to end.
+Follow one sensor reading through the whole chain to check that every part works.
 
 <Steps>
 1. **Publish a test message** from the command line (or let your ESP32 client send one):
@@ -1355,7 +1355,12 @@ Let us trace a single sensor reading through the entire pipeline to verify every
 <InArticleAd />
 
 
-You built a complete MQTT-to-dashboard pipeline using four tools: Mosquitto as the message broker, Telegraf as the MQTT consumer and data router, InfluxDB as the time-series database, and Grafana as the visualization layer. You learned how Telegraf's topic parsing extracts device and sensor tags from MQTT topic hierarchies, making it possible to filter and group data in queries. You explored InfluxDB's data model (buckets, measurements, tags, fields) and wrote Flux queries to filter by device, aggregate by time window, compare multiple devices, and detect anomalies. In Grafana, you created five panel types (time series, gauge, stat, table, and alert list), configured threshold lines for visual context, and added template variables for device selection. You compared the self-hosted TIG stack with the managed SiliconWit.io dashboard and identified when each approach is the better choice. You built a lightweight Chart.js alternative that runs in any browser and connects to MQTT over WebSocket, suitable for resource-constrained gateways. Finally, you explored data export options including CSV download, CLI export, REST API queries, Python client integration, and scheduled report automation.
+- A broker keeps no history. Mosquitto passes each message on, Telegraf collects it, InfluxDB stores it with its time, and Grafana asks InfluxDB and draws the result.
+- Telegraf takes the device and sensor names from the topic and stores them as tags. Tags are for filtering and grouping, fields are the measured values.
+- A panel shows the last stored value. A stopped sensor or a stopped collector can look normal for a while, and a mean can hide a short peak.
+- Keep raw data for a short time and averages for longer, so the disk does not fill.
+- A dashboard informs people. Limits that protect equipment stay in the device.
+- For a small gateway, a web page with Chart.js shows live values with no database, and so with no history.
 
 <IoTSystemsComments />
 

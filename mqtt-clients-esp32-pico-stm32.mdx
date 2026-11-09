@@ -25,35 +25,32 @@ import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/sta
 
 import IoTSystemsComments from '../../../../components/iot-systems/IoTSystemsComments.astro';
 
-A broker sitting idle is not very useful. The real work begins when embedded devices connect, authenticate, publish sensor data on well-structured topics, and recover gracefully from disconnections. In this lesson you will write MQTT client firmware for three different MCU platforms (ESP32, RPi Pico W, and STM32 with an ESP-01 Wi-Fi module), all publishing to the same Mosquitto broker you configured in Lesson 2. By the end, you will have a three-node sensor network with a consistent topic hierarchy, structured JSON payloads, and robust reconnection logic. #MQTT #ESP32 #MultiPlatform
+The Wi-Fi router restarts at night. In the morning half of the sensors are silent, because their firmware tried to connect once and stopped, and every chart has a hole. Sending a reading is the easy part of device firmware. The hard part is what the device does when the network is gone. In this lesson you write MQTT client firmware for three boards (ESP32, RPi Pico W, and STM32 with an ESP-01 Wi-Fi module). All three use the same topic names and message format, reconnect in a controlled way, and keep readings while offline. #MQTT #ESP32 #MultiPlatform
+
+The three nodes publish under one tree of topic names.
 
 ```text
-  MQTT Topic Hierarchy Design
-  ──────────────────────────────────────────
-  site/
-  └── building_a/
+  factory/
+  └── warehouse-a/
       ├── esp32/
-      │   └── sensor_01/
-      │       ├── temperature    ◄── 23.5
-      │       ├── humidity       ◄── 65.2
-      │       └── status         ◄── online
+      │   └── esp32-001/
+      │       ├── telemetry   ◄── readings
+      │       ├── alerts      ◄── limit passed
+      │       ├── commands    ──► to the device
+      │       └── status      ◄── online / offline
       ├── pico/
-      │   └── sensor_02/
-      │       ├── temperature
-      │       └── humidity
+      │   └── pico-001/ ...
       └── stm32/
-          └── sensor_03/
-              ├── temperature
-              └── air_quality
+          └── stm32-001/ ...
 
-  Subscribe: site/building_a/+/+/temperature
-  Gets temperature from ALL devices.
+  Subscribe: factory/warehouse-a/+/+/telemetry
+  gives the readings of all three devices.
 ```
 
 ## What We Are Building
 
 <Card title="Three-MCU Sensor Network" icon="star">
-Three microcontroller nodes, each reading a BME280 temperature/humidity sensor and publishing structured JSON to a shared MQTT broker. All nodes use the same topic hierarchy, the same payload format, and the same QoS strategy. You can monitor all three from a single `mosquitto_sub` session or from the SiliconWit.io dashboard.
+Three microcontroller nodes. Each reads a BME280 temperature and humidity sensor and publishes JSON to one MQTT broker, with the same topic pattern, payload format and QoS levels. You can watch all three from one `mosquitto_sub` session or from the SiliconWit.io dashboard.
 </Card>
 
 **Project specifications:**
@@ -66,10 +63,7 @@ Three microcontroller nodes, each reading a BME280 temperature/humidity sensor a
 | SiliconWit.io MQTT endpoint | mqtt.siliconwit.io:8883 (TLS, device token auth) |
 | Topic pattern | `site/building/device_type/device_id/measurement` |
 | Payload format | JSON with device_id, timestamp, temperature, humidity |
-| QoS strategy | QoS 0 for telemetry, QoS 1 for alerts, QoS 2 for commands |
 | Publish interval | Every 10 seconds |
-| Reconnection | Exponential backoff with jitter, 60s max interval |
-| Offline buffering | Store readings in flash/EEPROM, publish on reconnect |
 
 ### Bill of Materials
 
@@ -82,36 +76,16 @@ Three microcontroller nodes, each reading a BME280 temperature/humidity sensor a
 | S1-S3 | BME280 breakout | 3 | One per MCU (or move one between tests) |
 | | Breadboard + jumper wires | 1 set | |
 
-```text
-  Reconnection with Exponential Backoff
-  ──────────────────────────────────────────
-  Connect attempt 1: wait 1s
-  Connect attempt 2: wait 2s
-  Connect attempt 3: wait 4s
-  Connect attempt 4: wait 8s  + jitter
-  Connect attempt 5: wait 16s + jitter
-  Connect attempt 6: wait 32s + jitter
-  Connect attempt 7: wait 60s (max cap)
-
-  ┌──────┐ fail ┌──────┐ fail ┌──────┐
-  │ Try  ├─────►│ Wait ├─────►│ Try  │...
-  │  1   │      │ 1s   │      │  2   │
-  └──────┘      └──────┘      └──────┘
-
-  Jitter: add random 0 to 1s to prevent
-  all devices reconnecting simultaneously.
-```
-
 ## Topic Hierarchy Design
 
 <InArticleAd />
 
 
-A flat topic like `sensor/data` works for one device. It falls apart at ten devices and becomes unmanageable at a hundred. A well-designed hierarchy lets you filter, route, and control access at every level.
+A flat topic like `sensor/data` works for one device. With ten devices you cannot tell them apart, and with a hundred you cannot give each one its own permissions. A topic with levels lets you select and protect any part of the system.
 
 ### The Hierarchy Pattern
 
-The pattern used throughout this course follows a five-level structure:
+This course uses five levels:
 
 ```
 site/building/device_type/device_id/measurement
@@ -130,33 +104,26 @@ factory/office/esp32/esp32-002/telemetry
 
 ### Why Hierarchy Matters
 
-**ACLs (Access Control Lists).** With Mosquitto ACLs from Lesson 2, you can restrict each device to only its own subtree. Device `esp32-001` can publish to `factory/warehouse-a/esp32/esp32-001/#` but nowhere else. A dashboard user can subscribe to `factory/warehouse-a/#` to see all warehouse sensors without accessing the office.
+**Permissions.** With the access control list (ACL) from [the secure broker setup](/education/iot-systems/mqtt-broker-setup-secure-connection/), each device is limited to its own branch. Device `esp32-001` can publish to `factory/warehouse-a/esp32/esp32-001/#` and nowhere else. A dashboard user can subscribe to `factory/warehouse-a/#` and sees the warehouse but not the office.
 
-**Wildcards.** MQTT provides two wildcard characters for subscriptions:
-
-| Wildcard | Meaning | Example | Matches |
-|----------|---------|---------|---------|
-| `+` | Single level | `factory/+/esp32/+/telemetry` | All ESP32 telemetry in all buildings |
-| `#` | Multi-level (must be last) | `factory/warehouse-a/#` | Everything in warehouse-a |
-
-**Dashboard subscriptions.** A Grafana panel can subscribe to `factory/+/+/+/telemetry` and receive telemetry from every device across every building, regardless of device type. A building-specific panel subscribes to `factory/warehouse-a/+/+/telemetry`.
+**Wildcards.** A subscriber can replace levels with two characters. `+` stands for exactly one level: `factory/+/esp32/+/telemetry` gives the ESP32 telemetry of all buildings. `#` stands for all levels that follow and must be last: `factory/warehouse-a/#` gives everything in the warehouse. A `+` never stands for two levels or for none, so a device that leaves out one level is invisible to every subscription that counts the levels.
 
 ### SiliconWit.io Topic Mapping
 
-When connecting to the SiliconWit.io platform, the topic structure is different. SiliconWit.io uses a device-centric pattern:
+The SiliconWit.io platform uses its own, shorter pattern with the device in the middle:
 
 ```
 d/{device_id}/t
 ```
 
-Where `{device_id}` is the device identifier from your SiliconWit.io dashboard, and `t` is the telemetry subtopic. You authenticate with a device access token rather than username/password. We will show both self-hosted and SiliconWit.io connection examples for each platform.
+`{device_id}` is the device identifier from your SiliconWit.io dashboard, and `t` stands for telemetry. Commands arrive on `d/{device_id}/c`. The device ID is the username and a device access token is the password.
 
 ## JSON Payload Standard
 
 <InArticleAd />
 
 
-Every device in this course publishes data in a consistent JSON format. This simplifies parsing, storage, and dashboard configuration because every consumer knows exactly what fields to expect.
+If each board names its fields differently, every program that reads the data needs three versions. So all devices in this course publish the same JSON fields.
 
 ### Telemetry Payload
 
@@ -197,24 +164,26 @@ Every device in this course publishes data in a consistent JSON format. This sim
 }
 ```
 
-Commands are published by the operator (or an automation rule) and received by the device on its `commands` subtopic. The device parses the JSON, applies the setting, and optionally publishes an acknowledgment.
+The device receives a command on its `commands` subtopic. A command is a request: the device keeps its own limits and refuses a value outside them, because a command can arrive late, twice or not at all.
 
 ### Why JSON and Not Binary?
 
-JSON adds overhead (field names are repeated in every message), but for most IoT applications publishing every 10 seconds or slower, the extra bytes are negligible compared to the TCP/TLS overhead. JSON is human-readable, easy to parse on every platform, and directly ingestible by InfluxDB, Grafana, and Node-RED. For high-frequency data (hundreds of messages per second), consider CBOR or Protocol Buffers, but that is beyond the scope of this lesson.
+JSON repeats the field names in every message. At one message every 10 seconds those extra bytes are small beside the TCP and TLS overhead, and in return a person can read the message and every tool accepts it. For hundreds of messages per second, look at a binary format such as CBOR.
 
 ## QoS Selection Strategy
 
 <InArticleAd />
 
 
-Not every message deserves the same delivery guarantee. MQTT provides three QoS levels, and choosing the right one per message type balances reliability against bandwidth and latency.
+MQTT has three quality of service (QoS) levels. A higher level costs more packets, so each kind of message gets the level it needs.
 
-| QoS | Guarantee | Use In This Course |
+| QoS | What it promises | Use in this course |
 |-----|-----------|-------------------|
-| 0 | At most once (fire and forget) | Periodic telemetry (temperature, humidity every 10s). Missing one reading is acceptable because the next arrives in 10 seconds. |
-| 1 | At least once (acknowledged) | Alert messages (threshold exceeded). You want confirmation that the broker received the alert. Duplicate delivery is tolerable. |
-| 2 | Exactly once (four-step handshake) | Remote commands (change interval, reboot device). A duplicate command could cause unintended behavior, so exactly-once matters. |
+| 0 | At most once, no confirmation | Telemetry every 10 s. A lost reading is replaced by the next one. |
+| 1 | At least once, confirmed by the broker | Alerts. The device knows that the broker has the alert. A repeat does no harm. |
+| 2 | Exactly once (four packets) | Commands, where a repeat could change the result. |
+
+No level promises that a message reached its final reader. A confirmed alert is in the broker. Whether a person saw it is a different question, which the alert system must answer.
 
 :::tip[QoS applies to each direction independently]
 QoS is set per publish and per subscription. A device can publish telemetry at QoS 0 and subscribe to commands at QoS 2 on the same connection.
@@ -225,7 +194,7 @@ QoS is set per publish and per subscription. A device can publish telemetry at Q
 <InArticleAd />
 
 
-The ESP32 has native Wi-Fi, making it the most straightforward platform for MQTT. We use the ESP-IDF `mqtt_client` component, which supports TLS, automatic reconnection, and all three QoS levels.
+The ESP32 has Wi-Fi built in. Its ESP-IDF `mqtt_client` component supports TLS, reconnection and all three QoS levels.
 
 ### Project Structure
 
@@ -247,6 +216,8 @@ The ESP32 has native Wi-Fi, making it the most straightforward platform for MQTT
 </FileTree>
 
 ### Wi-Fi Connection
+
+This file joins the Wi-Fi network and tries again up to 10 times if the connection drops.
 
 ```c title="wifi_connect.c"
 #include <string.h>
@@ -325,11 +296,21 @@ void wifi_init_sta(void)
 
 ### MQTT Handler with TLS, LWT, and Reconnection
 
+Read this file in three parts:
+
+- `mqtt_event_handler` reacts to events. On connect it publishes a retained "online" status and subscribes to commands. On disconnect it waits with a growing delay.
+- `mqtt_app_start` sets the broker address, the CA certificate, the last will (LWT, the "offline" message the broker publishes if the device disappears) and a keepalive of 30 seconds.
+- The publish functions use QoS 0 for telemetry and QoS 1 for alerts.
+
 ```c title="mqtt_handler.c"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "mqtt_client.h"
 #include "mqtt_handler.h"
 
@@ -376,7 +357,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
         ESP_LOGI(TAG, "Subscribed to %s at QoS 2", TOPIC_COMMANDS);
         break;
 
-    case MQTT_EVENT_DISCONNECTED:
+    case MQTT_EVENT_DISCONNECTED: {
         ESP_LOGW(TAG, "MQTT disconnected");
         mqtt_connected = false;
 
@@ -394,18 +375,33 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             backoff_ms = BACKOFF_MAX_MS;
         }
         break;
+    }
 
-    case MQTT_EVENT_DATA:
+    case MQTT_EVENT_DATA: {
         ESP_LOGI(TAG, "Received message on topic: %.*s", event->topic_len, event->topic);
         ESP_LOGI(TAG, "Payload: %.*s", event->data_len, event->data);
 
+        /* event->data is NOT null-terminated: copy it before using strstr */
+        char cmd[128];
+        int cmd_len = event->data_len;
+        if (cmd_len > (int)sizeof(cmd) - 1) {
+            cmd_len = sizeof(cmd) - 1;
+        }
+        memcpy(cmd, event->data, cmd_len);
+        cmd[cmd_len] = '\0';
+
         /* Parse command JSON (simplified; production code should use cJSON) */
-        if (strstr(event->data, "set_interval")) {
-            int new_interval = 10;  /* Parse from JSON in real implementation */
+        if (strstr(cmd, "set_interval")) {
+            int new_interval = 10;
+            const char *value = strstr(cmd, "\"value\"");
+            if (value && (value = strchr(value, ':')) != NULL) {
+                new_interval = atoi(value + 1);
+            }
             ESP_LOGI(TAG, "Setting publish interval to %d seconds", new_interval);
             /* Update the publish interval variable here */
         }
         break;
+    }
 
     case MQTT_EVENT_ERROR:
         ESP_LOGE(TAG, "MQTT error type: %d", event->error_handle->error_type);
@@ -512,7 +508,11 @@ esp_mqtt_client_config_t mqtt_cfg = {
         .address = {
             .uri = "mqtts://mqtt.siliconwit.io:8883",
         },
-        /* SiliconWit.io uses a publicly trusted CA; you may not need a custom cert */
+        /* SiliconWit.io uses a publicly trusted CA, so the ESP-IDF certificate
+           bundle can verify it (add #include "esp_crt_bundle.h") */
+        .verification = {
+            .crt_bundle_attach = esp_crt_bundle_attach,
+        },
     },
     .credentials = {
         .username = SILICONWIT_DEVICE_ID,
@@ -531,6 +531,8 @@ esp_mqtt_client_publish(client, SILICONWIT_TOPIC, payload, 0, 0, 0);
 ```
 
 ### Main Application Loop
+
+`sensor_task` reads the sensor, publishes and waits. Notice that the comparison with the 40 °C limit happens here, in the device. The alert message only reports it.
 
 ```c title="main.c"
 #include <stdio.h>
@@ -584,7 +586,7 @@ void app_main(void)
 <InArticleAd />
 
 
-The RPi Pico W has onboard Wi-Fi and runs MicroPython, which provides a very different development experience from the C-based ESP32. The `umqtt.simple` library handles MQTT, and the code is shorter but follows the same architecture: connect, publish, subscribe, reconnect.
+The RPi Pico W has Wi-Fi on the board and runs MicroPython here. The `umqtt.simple` library handles MQTT. The code is shorter than the C code of the ESP32, but it has the same four jobs: connect, publish, subscribe, reconnect.
 
 ### Project Structure
 
@@ -598,6 +600,8 @@ The RPi Pico W has onboard Wi-Fi and runs MicroPython, which provides a very dif
 </FileTree>
 
 ### Configuration
+
+All settings are in one file, so the other files contain no names or passwords.
 
 ```python title="config.py"
 # Wi-Fi settings
@@ -641,6 +645,8 @@ BACKOFF_MULTIPLIER = 2.0
 ```
 
 ### MQTT Client with Reconnection
+
+One class holds the whole client. Notice `connect`, which sets the last will before it connects, and `reconnect`, which waits for the backoff delay and then calls `connect` again.
 
 ```python title="mqtt_client.py"
 import time
@@ -707,7 +713,7 @@ class SensorMQTTClient:
     def reconnect(self):
         """Reconnect with exponential backoff and jitter."""
         import urandom
-        jitter = urandom.getrandbits(10) % (self.backoff_ms // 4 + 1)
+        jitter = urandom.getrandbits(16) % (self.backoff_ms // 4 + 1)
         delay = self.backoff_ms + jitter
         print(f"Reconnecting in {delay} ms")
         time.sleep_ms(delay)
@@ -795,6 +801,8 @@ class SensorMQTTClient:
 ```
 
 ### Wi-Fi Connection and Main Loop
+
+If the client is connected, the loop first sends the stored readings and then the new one. If not, it stores the reading and tries to reconnect. The call to `reconnect` waits for the whole backoff delay, so during a long outage the stored readings are further apart than 10 seconds.
 
 ```python title="main.py"
 import network
@@ -912,9 +920,9 @@ def connect_siliconwit(self):
 <InArticleAd />
 
 
-The STM32F4 does not have built-in Wi-Fi, so we use an ESP-01 module connected over UART. The ESP-01 runs stock AT firmware and handles the entire TCP/Wi-Fi stack. The STM32 sends AT commands to connect to Wi-Fi, establish a TCP connection to the MQTT broker, and then sends raw MQTT packets over the TCP link.
+The STM32F4 has no Wi-Fi, so an ESP-01 module is connected to it over a UART serial line. The ESP-01 does the Wi-Fi and TCP work. The STM32 controls it with AT commands, short text commands that begin with the letters AT, and then builds each MQTT packet itself, byte by byte.
 
-This approach is common in industrial IoT where the main MCU handles real-time control and a secondary module handles connectivity.
+This division is common in industry: the main microcontroller does the real-time control, and a second module does the communication. If the network fails, the control continues.
 
 ### Hardware Connections
 
@@ -931,7 +939,7 @@ The ESP-01 draws up to 300 mA during Wi-Fi transmission. The STM32 dev board 3.3
 
 ### AT Command Sequence
 
-The ESP-01 AT firmware accepts commands over UART. Here is the complete sequence to connect to Wi-Fi and establish an MQTT connection:
+The sequence has two parts. A line with `->` is the answer of the ESP-01. First the module joins the Wi-Fi network:
 
 ```text title="at_command_sequence.txt"
 # 1. Test AT communication
@@ -952,7 +960,11 @@ AT+CWJAP="your-ssid","your-password"
 AT+CIFSR
 -> +CIFSR:STAIP,"192.168.1.100"
 -> OK
+```
 
+Then it opens the TCP connection to the broker. After step 7 the module is "transparent": every byte the STM32 sends goes straight to the broker.
+
+```text title="at_command_sequence.txt (continued)"
 # 5. Establish TCP connection to MQTT broker
 AT+CIPSTART="TCP","your-broker-ip",1883
 -> CONNECT
@@ -971,6 +983,8 @@ AT+CIPSEND
 ```
 
 ### STM32 AT Command Driver
+
+The driver sends the AT commands above from C. Notice that each command waits for its answer with a time limit, so a silent module cannot stop the program for ever.
 
 ```c title="esp01_at.h"
 #ifndef ESP01_AT_H
@@ -1006,21 +1020,29 @@ extern UART_HandleTypeDef huart2;
 
 static char rx_buffer[512];
 static volatile uint16_t rx_index = 0;
+static uint8_t rx_byte;  /* One byte, filled by the UART interrupt */
+
+/* Empty the receive buffer with the UART interrupt held off */
+static void rx_clear(void)
+{
+    __disable_irq();
+    rx_index = 0;
+    memset(rx_buffer, 0, sizeof(rx_buffer));
+    __enable_irq();
+}
 
 void esp01_init(void)
 {
-    rx_index = 0;
-    memset(rx_buffer, 0, sizeof(rx_buffer));
+    rx_clear();
 
-    /* Enable UART receive interrupt */
-    HAL_UART_Receive_IT(&huart2, (uint8_t *)&rx_buffer[rx_index], 1);
+    /* Enable UART receive interrupt (one byte at a time) */
+    HAL_UART_Receive_IT(&huart2, &rx_byte, 1);
 }
 
 at_result_t esp01_send_cmd(const char *cmd, const char *expected, uint32_t timeout_ms)
 {
     /* Clear receive buffer */
-    rx_index = 0;
-    memset(rx_buffer, 0, sizeof(rx_buffer));
+    rx_clear();
 
     /* Send command with CR+LF */
     char cmd_buf[128];
@@ -1056,7 +1078,7 @@ at_result_t esp01_wifi_connect(const char *ssid, const char *password)
     /* Connect to Wi-Fi */
     char cmd[128];
     snprintf(cmd, sizeof(cmd), "AT+CWJAP=\"%s\",\"%s\"", ssid, password);
-    res = esp01_send_cmd(cmd, "WIFI GOT IP", 15000);
+    res = esp01_send_cmd(cmd, "\r\nOK\r\n", 15000);
 
     return res;
 }
@@ -1065,14 +1087,24 @@ at_result_t esp01_tcp_connect(const char *host, uint16_t port)
 {
     char cmd[128];
     snprintf(cmd, sizeof(cmd), "AT+CIPSTART=\"TCP\",\"%s\",%u", host, port);
-    return esp01_send_cmd(cmd, "CONNECT", 10000);
+    at_result_t res = esp01_send_cmd(cmd, "\r\nOK\r\n", 10000);
+    if (res != AT_OK) return res;
+
+    /* Transparent transmission: from here every byte goes straight to
+       the broker, and every byte from the broker comes straight back */
+    res = esp01_send_cmd("AT+CIPMODE=1", "OK", 2000);
+    if (res != AT_OK) return res;
+    res = esp01_send_cmd("AT+CIPSEND", ">", 5000);
+    if (res != AT_OK) return res;
+
+    HAL_Delay(50);
+    rx_clear();  /* Drop the AT replies so the buffer holds only MQTT bytes */
+    return AT_OK;
 }
 
 void esp01_send_raw(const uint8_t *data, uint16_t len)
 {
-    char cmd[32];
-    snprintf(cmd, sizeof(cmd), "AT+CIPSEND=%u", len);
-    esp01_send_cmd(cmd, ">", 5000);
+    /* Transparent mode is active, so the bytes go out unchanged */
     HAL_UART_Transmit(&huart2, (uint8_t *)data, len, 5000);
 }
 
@@ -1082,14 +1114,25 @@ uint16_t esp01_recv_raw(uint8_t *buf, uint16_t max_len, uint32_t timeout_ms)
     while ((HAL_GetTick() - start) < timeout_ms && rx_index == 0) {
         HAL_Delay(10);
     }
+    if (rx_index == 0) return 0;
+    HAL_Delay(20);  /* Let the rest of the packet arrive */
+
+    __disable_irq();
     uint16_t copy_len = (rx_index < max_len) ? rx_index : max_len;
     memcpy(buf, rx_buffer, copy_len);
     rx_index = 0;
+    __enable_irq();
     return copy_len;
 }
 
 void esp01_close(void)
 {
+    /* Leave transparent mode: send "+++" with no line ending, with one
+       second of silence before and after. Then AT commands work again. */
+    HAL_Delay(1000);
+    HAL_UART_Transmit(&huart2, (uint8_t *)"+++", 3, 1000);
+    HAL_Delay(1000);
+    esp01_send_cmd("AT+CIPMODE=0", "OK", 2000);
     esp01_send_cmd("AT+CIPCLOSE", "OK", 2000);
 }
 
@@ -1097,17 +1140,18 @@ void esp01_close(void)
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart == &huart2) {
-        rx_index++;
         if (rx_index < sizeof(rx_buffer) - 1) {
-            HAL_UART_Receive_IT(&huart2, (uint8_t *)&rx_buffer[rx_index], 1);
+            rx_buffer[rx_index++] = (char)rx_byte;
         }
+        /* Always re-arm the interrupt, even when the buffer is full */
+        HAL_UART_Receive_IT(&huart2, &rx_byte, 1);
     }
 }
 ```
 
 ### MQTT Packet Builder
 
-Since the STM32 sends raw MQTT packets (not using a high-level library), we need a minimal MQTT packet builder:
+The STM32 uses no MQTT library, so it needs functions that build the packets. Each one fills a buffer and returns the number of bytes. Notice `encode_remaining_length`: MQTT writes the packet length in 1 to 4 bytes, 7 bits in each.
 
 ```c title="mqtt_packet.h"
 #ifndef MQTT_PACKET_H
@@ -1170,7 +1214,7 @@ uint16_t mqtt_build_connect(uint8_t *buf, const char *client_id,
     uint8_t flags = 0x02;  /* Clean session */
     if (username) flags |= 0x80;
     if (password) flags |= 0x40;
-    if (will_topic && will_msg) flags |= 0x04 | 0x08;  /* Will flag + Will QoS 1 */
+    if (will_topic && will_msg) flags |= 0x04 | 0x08 | 0x20;  /* Will flag + Will QoS 1 + Will retain */
 
     var_header[7] = flags;
     var_header[8] = (keepalive >> 8) & 0xFF;
@@ -1279,6 +1323,8 @@ uint16_t mqtt_build_disconnect(uint8_t *buf)
 ```
 
 ### STM32 Main Application
+
+`mqtt_connect_sequence` runs the steps in order: Wi-Fi, TCP, the MQTT CONNECT packet with the last will, then the subscription to commands. The main loop publishes every 10 seconds and sends a ping at half the keepalive time, so the broker does not declare the device lost.
 
 ```c title="stm32_mqtt_main.c"
 #include "main.h"
@@ -1455,7 +1501,7 @@ int main(void)
 
 ### Alternative: STM32 with Ethernet (lwIP + MQTT)
 
-If your STM32 board has an Ethernet PHY (such as the STM32F407 Discovery with a LAN8720 module), you can use the lwIP TCP/IP stack with an MQTT client library directly, eliminating the ESP-01 entirely:
+If your STM32 board has an Ethernet interface (such as the STM32F407 Discovery with a LAN8720 module), the STM32 can run the lwIP network software and its MQTT client itself, with no ESP-01:
 
 ```c title="stm32_ethernet_mqtt.c (lwIP approach)"
 #include "lwip/apps/mqtt.h"
@@ -1514,7 +1560,7 @@ void mqtt_ethernet_init(void)
 ```
 
 :::note[Which approach to choose]
-The ESP-01 AT approach is more common in cost-sensitive designs where the STM32 was chosen for its real-time peripherals and Wi-Fi was an afterthought. The Ethernet approach is better for industrial installations where wired connectivity is preferred for reliability. Both produce the same MQTT messages.
+The ESP-01 suits a low-cost design where the STM32 was chosen for its real-time peripherals and Wi-Fi was added later. Ethernet suits an industrial installation where a cable is preferred because it is more reliable. Both produce the same MQTT messages.
 :::
 
 ## Reconnection Strategies
@@ -1522,23 +1568,38 @@ The ESP-01 AT approach is more common in cost-sensitive designs where the STM32 
 <InArticleAd />
 
 
-Network connections fail. Wi-Fi access points reboot, brokers restart for updates, and cellular modems lose signal. A production MQTT client must handle disconnections without losing data or flooding the network with reconnection attempts.
+Network connections fail. Wi-Fi access points restart, brokers stop for updates, and mobile modems lose signal. A client that retries once and stops is lost. A client that retries every second, together with hundreds of others, can overload the broker at the moment it comes back.
 
 ### Exponential Backoff with Jitter
 
-All three platform implementations in this lesson use the same reconnection strategy:
+The answer is to wait longer after each failure, as you do with a busy telephone number: you try again soon, then after a longer pause. All three clients do this:
 
 <Steps>
-1. **Start with a small delay.** The first reconnection attempt waits 1 second. This handles brief network glitches quickly.
+1. **Start with a small delay.** The first attempt waits 1 second. A short interruption is repaired quickly.
 
-2. **Double the delay on each failure.** If the first attempt fails, wait 2 seconds. Then 4, 8, 16, 32 seconds. This prevents a flood of reconnection attempts when the broker is down for maintenance.
+2. **Double the delay on each failure.** Then wait 2, 4, 8, 16, 32 seconds. This is the "exponential backoff". A broker that is down for maintenance gets few attempts.
 
-3. **Cap the maximum delay.** The backoff stops growing at 60 seconds. Without a cap, the delay would grow to hours after enough failures.
+3. **Limit the delay.** The delay stops growing at 60 seconds. Without a limit it would grow to hours.
 
-4. **Add random jitter.** Each delay gets a random offset of 0 to 25% of the backoff value. Jitter prevents the "thundering herd" problem where many devices reconnect at the exact same instant after a broker restart, potentially crashing it again.
+4. **Add a random part, called jitter.** Each delay gets a random extra of 0 to 25% of its value. Without jitter, all devices that lost the broker at the same instant would also return at the same instant.
 </Steps>
 
-The formula for each reconnection delay:
+```text
+  Attempt   Wait before it   Time since the failure
+  ───────   ──────────────   ──────────────────────
+     1           1 s                  1 s
+     2           2 s                  3 s
+     3           4 s                  7 s
+     4           8 s                 15 s
+     5          16 s                 31 s
+     6          32 s                 63 s
+     7          60 s  (limit)       123 s
+
+  Each wait also gets a random extra (jitter)
+  of up to a quarter of its value.
+```
+
+As a formula, with the delays in milliseconds:
 
 ```
 delay = min(backoff_initial * 2^attempt, backoff_max) + random(0, delay/4)
@@ -1556,19 +1617,19 @@ vTaskDelay(pdMS_TO_TICKS(delay));
 backoff_ms = (int)(backoff_ms * 2.0);
 if (backoff_ms > 60000) backoff_ms = 60000;
 ```
-The ESP-IDF MQTT client has built-in reconnection, but implementing your own gives you control over the backoff parameters and allows you to trigger offline buffering during the wait.
+The ESP-IDF MQTT client can reconnect by itself. Your own code lets you choose the delays.
 </TabItem>
 <TabItem label="Pico W (Python)">
 ```python
 import urandom
-jitter = urandom.getrandbits(10) % (self.backoff_ms // 4 + 1)
+jitter = urandom.getrandbits(16) % (self.backoff_ms // 4 + 1)
 delay = self.backoff_ms + jitter
 time.sleep_ms(delay)
 self.backoff_ms = int(self.backoff_ms * 2.0)
 if self.backoff_ms > 60000:
     self.backoff_ms = 60000
 ```
-MicroPython's `urandom` module provides the random component. The `getrandbits` function is more efficient than `randint` on constrained devices.
+MicroPython's `urandom` module gives the random part.
 </TabItem>
 <TabItem label="STM32 (C)">
 ```c
@@ -1578,7 +1639,7 @@ HAL_Delay(delay);
 backoff_ms = backoff_ms * 2;
 if (backoff_ms > 60000) backoff_ms = 60000;
 ```
-The STM32 uses `HAL_GetTick()` as a pseudo-random source since it does not have a hardware RNG on all variants. For STM32F4 and above, you can use the hardware RNG peripheral (`HAL_RNG_GenerateRandomNumber`) for better jitter.
+The STM32 uses the tick counter `HAL_GetTick()` as a rough random source. On an STM32F4 the hardware random number generator (`HAL_RNG_GenerateRandomNumber`) gives better jitter.
 </TabItem>
 </Tabs>
 
@@ -1587,15 +1648,19 @@ The STM32 uses `HAL_GetTick()` as a pseudo-random source since it does not have 
 <InArticleAd />
 
 
-When the MQTT connection drops, you have two choices: discard the readings or buffer them for later. For most IoT applications, buffering is worth the extra complexity because gaps in time-series data make trends and anomalies harder to detect.
+When the MQTT connection drops, the device can discard its readings or keep them for later. Keeping them is usually worth the extra code, because a gap in the record hides exactly the event you want to study afterwards.
 
 ### Buffer Architecture
 
-The buffer stores readings in a circular array. When the array is full, the oldest entry is overwritten. On reconnect, the buffer is flushed in chronological order before new readings are published.
+The buffer is a circular array, like a notebook with a fixed number of lines: when the last line is full, writing continues on the first line and replaces the oldest reading. So the buffer holds the newest readings, and its size sets how long an outage it can cover. With 50 entries and one reading every 10 seconds, that is 500 seconds, a little over 8 minutes. After a reconnect, the stored readings are published first, oldest first.
+
+In the listings, notice the store function, which writes one reading and moves the write position, and the flush function, which publishes the stored readings with a pause of 50 ms between them. The ESP32 and Pico versions keep the time of each measurement. The Pico flush publishes with QoS 0, so it is not confirmed.
 
 <Tabs>
 <TabItem label="ESP32 (NVS Flash)">
 ```c title="offline_buffer.c"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "nvs_flash.h"
 #include "esp_log.h"
 #include <string.h>
@@ -1834,11 +1899,11 @@ For power-cycle persistence on STM32, write the buffer to internal flash or an e
 <InArticleAd />
 
 
-With all three clients implemented, it is time to verify that they all publish to the same broker and that the data is consistent.
+Now check that all three clients publish to the same broker in the same format.
 
 ### Start the Broker
 
-Make sure your Mosquitto broker from Lesson 2 is running:
+Make sure the Mosquitto broker from the secure broker setup is running:
 
 ```bash title="Terminal 1: Start Mosquitto"
 sudo systemctl start mosquitto
@@ -1847,7 +1912,7 @@ sudo systemctl status mosquitto
 
 ### Subscribe to All Telemetry
 
-Open a terminal and subscribe to all telemetry topics using the multi-level wildcard:
+In a second terminal, subscribe to the telemetry of all devices:
 
 ```bash title="Terminal 2: Subscribe to all telemetry"
 mosquitto_sub -h localhost -p 1883 \
@@ -1881,7 +1946,7 @@ The `-v` flag prints the topic alongside the payload, so you can see which devic
 
 ### Expected Output
 
-After all three nodes are running, your `mosquitto_sub` terminal should show interleaved messages from all devices:
+The `mosquitto_sub` terminal now shows the messages of all three devices, mixed:
 
 ```text title="mosquitto_sub output"
 factory/warehouse-a/esp32/esp32-001/telemetry {"device_id":"esp32-001","ts":1710028800,"temperature":24.5,"humidity":58.3}
@@ -1901,7 +1966,7 @@ To verify the reconnection and buffering logic:
 
 2. **Restore Wi-Fi.** Each device should reconnect automatically. The ESP32 and Pico should flush their buffered readings, and you will see a burst of messages in `mosquitto_sub` with timestamps from the offline period.
 
-3. **Stop and restart Mosquitto.** Run `sudo systemctl stop mosquitto`, wait 20 seconds, then `sudo systemctl start mosquitto`. The LWT message should appear for each device (status: offline), and then the devices should reconnect and publish their online status.
+3. **Stop and restart Mosquitto.** Run `sudo systemctl stop mosquitto`, wait 20 seconds, then `sudo systemctl start mosquitto`. The devices should reconnect and publish their online status. No LWT appears in this test, because the broker is the one that publishes the LWT and it was not running. To see the LWT (status: offline), remove power from one device and wait about 45 seconds: the broker gives up on a silent client after 1.5 times the 30-second keepalive.
 
 4. **Send a command.** Publish a command to change the publish interval:
    ```bash
@@ -1910,7 +1975,7 @@ To verify the reconnection and buffering logic:
      -t "factory/warehouse-a/esp32/esp32-001/commands" \
      -m '{"command":"set_interval","value":30}'
    ```
-   The ESP32 serial monitor should show that it received the command and changed its interval to 30 seconds.
+   The ESP32 serial monitor should show that it received the command and read the new interval of 30 seconds. The ESP32 example only logs the value; the Pico W client also applies it.
 </Steps>
 
 ### Testing with SiliconWit.io
@@ -1932,40 +1997,38 @@ To verify the SiliconWit.io connection:
 <InArticleAd />
 
 
-This lesson built MQTT client firmware for three different MCU platforms, all publishing to a single broker with a consistent topic hierarchy and JSON payload format.
-
 <CardGrid>
   <Card title="Topic Hierarchy" icon="star">
-    The five-level `site/building/device_type/device_id/measurement` pattern enables fine-grained ACLs, flexible wildcard subscriptions, and clean dashboard layouts. SiliconWit.io uses `d/{device_id}/t` for its managed topics.
+    Five levels, `site/building/device_type/device_id/measurement`, give each device its own branch for permissions and let one wildcard select many devices. SiliconWit.io uses `d/{device_id}/t`.
   </Card>
 
   <Card title="Three Platforms" icon="approve-check">
-    ESP32 (ESP-IDF with native Wi-Fi), RPi Pico W (MicroPython with umqtt.simple), and STM32 (AT commands to ESP-01 or lwIP with Ethernet). Each speaks the same MQTT and JSON, so the broker and dashboards do not care which MCU sent the data.
+    ESP32 in C, RPi Pico W in MicroPython, STM32 through an ESP-01 or Ethernet. All send the same MQTT and JSON, so the broker cannot tell which board sent the data.
   </Card>
 
   <Card title="Resilient Connections" icon="setting">
-    Exponential backoff with jitter prevents thundering herd reconnections. Message buffering in flash/EEPROM preserves data during outages. LWT messages notify subscribers when a device goes offline.
+    A growing delay with a random part stops all devices from returning at the same instant. A buffer keeps the newest readings during an outage, up to its size. The last will tells subscribers when a device has gone.
   </Card>
 
   <Card title="QoS Strategy" icon="warning">
-    QoS 0 for frequent telemetry (acceptable loss), QoS 1 for alerts (at least once), QoS 2 for commands (exactly once). Choosing the right QoS per message type balances reliability against bandwidth.
+    QoS 0 for frequent telemetry, QoS 1 for alerts, QoS 2 for commands. Each level is a promise about the step to or from the broker, not about the final reader.
   </Card>
 </CardGrid>
 
-In the next lesson, you will connect this three-node network to InfluxDB and Grafana to build real-time dashboards that visualize the data from all three devices on a single screen.
+Next, the lesson on [real-time dashboards](/education/iot-systems/realtime-dashboards-data-visualization/) stores the data of these three nodes and shows it on one screen.
 
 ## Exercises
 
 <InArticleAd />
 
 
-**Exercise 1: Add a Third Sensor Type.** Connect a light sensor (BH1750 or LDR with ADC) to one of the MCUs. Extend the JSON payload to include a `"light_lux"` field. Update the topic hierarchy to include the new measurement type. Verify that the new field appears in `mosquitto_sub` output.
+**Exercise 1: Add a third sensor type.** Connect a light sensor (BH1750 or LDR with ADC) to one of the boards. Add a `"light_lux"` field to the JSON payload and check that it appears in the `mosquitto_sub` output.
 
-**Exercise 2: Implement Command Acknowledgment.** When a device receives a command (such as `set_interval`), it should publish an acknowledgment message on a new `ack` subtopic (for example, `factory/warehouse-a/esp32/esp32-001/ack`). The acknowledgment payload should include the command name, the new value, and a success/failure status. Implement this on all three platforms.
+**Exercise 2: Acknowledge commands.** When a device receives a command such as `set_interval`, let it publish an answer on a new `ack` subtopic (for example `factory/warehouse-a/esp32/esp32-001/ack`) with the command name, the new value and a success or failure status. Do this on all three boards.
 
-**Exercise 3: Stress Test Offline Buffering.** Disconnect the Wi-Fi for 5 minutes while all three devices are running with a 10-second publish interval. That produces approximately 30 buffered readings per device. Reconnect and measure how long it takes to flush all buffered messages. Experiment with different flush delays (10 ms, 50 ms, 200 ms) and observe whether the broker drops any messages.
+**Exercise 3: Test the offline buffer.** Disconnect the Wi-Fi for 5 minutes while all three devices run. Reconnect, count the readings that each device sends from its buffer, and explain any that are missing. Try flush delays of 10 ms, 50 ms and 200 ms and observe whether the broker drops messages.
 
-**Exercise 4: Dual-Destination Forwarding.** Modify one of the clients (your choice of platform) to connect to both your self-hosted Mosquitto broker and SiliconWit.io's MQTT endpoint simultaneously. Publish the same telemetry to both destinations. This requires maintaining two MQTT client instances and handling reconnection for each independently. Document the additional RAM and CPU usage compared to a single-destination configuration.
+**Exercise 4: Two destinations.** Change one client so that it connects to your own Mosquitto broker and to the SiliconWit.io MQTT endpoint at the same time, with two client instances that reconnect independently. Record the extra RAM and processor use.
 
 <IoTSystemsComments />
 

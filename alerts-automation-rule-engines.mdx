@@ -25,91 +25,56 @@ import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/sta
 
 import IoTSystemsComments from '../../../../components/iot-systems/IoTSystemsComments.astro';
 
-A dashboard full of charts is useless if nobody is watching it at 3 AM when a freezer compressor fails. Alerts turn passive data into active notifications that reach the right person on the right channel at the right time. In this lesson you will build a Python alert engine that evaluates rules against live MQTT data, wire up five different notification channels (email, SMS, Discord, Slack, Telegram), create visual automation flows with Node-RED, and compare all of these with the managed alert system on SiliconWit.io. #Alerts #Automation #NodeRED
+A freezer compressor fails at 3 in the morning. The chart shows it clearly, and nobody is looking at the chart. An alert sends the fact to a person. But an alert that fires every night for no reason is ignored on the night that matters, so most of the work is in choosing the rule. In this lesson you choose rules that people will trust, build a Python alert engine that checks them against live MQTT data, send alerts through five channels, build automation flows with Node-RED, and compare these with the managed alerts on SiliconWit.io. #Alerts #Automation #NodeRED
 
 ## Why Alerting Matters
 
-Data without alerts is just noise. Consider a greenhouse with temperature and humidity sensors publishing to your MQTT broker every 10 seconds. The Grafana dashboard from Lesson 4 shows beautiful charts, but those charts only help if someone is actively looking at them. The moment you walk away from the screen, your monitoring system is blind.
+A chart helps only while someone looks at it. An alert system checks each new reading against rules and tells a person when a rule is met.
+
+Sending the message is the easy part. Every alert needs four choices, made before any code is written:
+
+1. **The field.** The one measured value that shows the problem. For a cold room it is the air temperature.
+2. **A limit that leaves time to act.** Work back from the damage. Suppose the stock is harmed at 8 °C, the room warms 0.1 °C per minute when the compressor stops, and a technician needs 30 minutes to arrive. In that time the room warms 0.1 × 30 = 3 °C, so the limit must be 8 minus 3 = 5 °C or lower. An alert at 7.5 °C only announces the loss.
+3. **How long the condition must last.** A door open for one minute also passes 5 °C. Require the condition to hold for some time, and add that time to the time to act.
+4. **Who is told next.** If the first person does not confirm in a set time, the alert goes to a second person. This is called escalation.
+
+The drawing shows the third choice. The short peak does not fire the alert. The long one does, 30 seconds after it passes the limit.
 
 ```text
-  Node-RED Alert Flow
-  ──────────────────────────────────────────
-  ┌──────────┐   ┌──────────┐   ┌─────────┐
-  │ MQTT In  │──►│ Function │──►│ Switch  │
-  │ (sensor/ │   │ (parse   │   │ (temp   │
-  │  temp)   │   │  JSON)   │   │  > 35?) │
-  └──────────┘   └──────────┘   └────┬────┘
-                                     │
-                          ┌──────────┼──────────┐
-                          ▼          ▼          ▼
-                     ┌────────┐ ┌────────┐ ┌───────┐
-                     │ Slack  │ │ Email  │ │ MQTT  │
-                     │ notify │ │ alert  │ │ Out   │
-                     └────────┘ └────────┘ │(actua-│
-                                           │ tor)  │
-                                           └───────┘
+ temperature
+     │                        ┌──────────────────
+  35 │- - - ┌──┐ - - - - - - -│- - - - - - - - - -  limit
+     │      │  │              │
+     │──────┘  └──────────────┘
+     └─────────────────────────────────────────► time
+            short peak:       above the limit for
+            no alert          30 s: alert fires
 ```
 
-An alert system closes that gap. It continuously evaluates incoming data against a set of rules and takes action when a condition is met: send a message, trigger an actuator, log an incident, or escalate to a second person if the first does not acknowledge within a time window.
-
-**What a good alerting system provides:**
-
-| Capability | Why It Matters |
-|-----------|---------------|
-| Real-time evaluation | Catches problems within seconds, not hours |
-| Multiple notification channels | Reaches people wherever they are (phone, email, chat) |
-| Cooldown periods | Prevents alert spam during sustained events |
-| Escalation | Notifies a backup person if the primary does not respond |
-| Active hours | Suppresses non-critical alerts during off-hours |
-| Audit trail | Logs every alert for post-incident review |
-
-```text
-  Alert Evaluation Flow
-  ──────────────────────────────────────────
-  MQTT message arrives
-       │
-       ▼
-  Parse JSON payload (temp, humidity, ts)
-       │
-       ▼
-  ┌──────────────┐
-  │ temp > 35C?  │──YES──► Fire threshold alert
-  └──────┬───────┘         │
-         │ NO              ├──► Slack message
-         ▼                 ├──► Email
-  ┌──────────────┐         └──► Log to DB
-  │ In cooldown? │
-  └──────┬───────┘
-         │ NO
-         ▼
-  ┌──────────────┐
-  │ Last msg     │
-  │ > 5 min ago? │──YES──► Fire status alert
-  └──────────────┘         "Device offline"
-```
+One failure passes no limit at all. A device that has lost power sends nothing, so a rule on its readings never fires. Only something outside the device can notice the silence, with a rule of the form "no data for N minutes".
 
 ## Alert Types
 
 <InArticleAd />
 
 
-Not every alert is a simple threshold comparison. A robust IoT system needs several alert types to cover different failure modes.
+A limit on one value does not catch every failure. Four types of alert cover most of them.
 
 <CardGrid>
   <Card title="Threshold Alerts" icon="warning">
-    The most common type. Fire when a value crosses a boundary. Examples: temperature exceeds 35 C, battery voltage drops below 3.2 V, humidity exceeds 80%. Can be upper, lower, or both (band alert).
+    The most common type. Fire when a value passes a limit: temperature above 35 C, battery voltage below 3.2 V. The limit can be upper, lower, or both.
   </Card>
 
   <Card title="Status Alerts" icon="error">
-    Fire when a device changes state. The most important one: "device offline." If your broker has not received a message from a device in 5 minutes, something is wrong. Also covers: device reconnected, firmware version mismatch, unexpected reboot detected via uptime counter reset.
+    Fire when a device changes state. The most important one is "device offline": the broker has received no message from the device for 5 minutes. Also: device reconnected, wrong firmware version, unexpected restart (the uptime counter went back to zero).
   </Card>
 
   <Card title="Rate-of-Change Alerts" icon="rocket">
-    Fire when a value changes too quickly. A pressure sensor dropping 10 kPa in 30 seconds may indicate a pipe burst even though the absolute value is still within range. Rate alerts catch fast-moving failures that threshold alerts miss.
+    Fire when a value changes too fast. A pressure that falls 10 kPa in 30 seconds may mean a burst pipe, although the value is still inside its limits.
   </Card>
 
   <Card title="Inactivity Alerts" icon="star">
-    Fire when expected data stops arriving. Different from "device offline" because the device might still be connected but a specific sensor stopped publishing. Example: a soil moisture sensor that publishes every 60 seconds has not sent data in 10 minutes.
+    Fire when expected data stops. The device may still be connected while one of its sensors has stopped: a soil moisture sensor that publishes every 60 seconds has sent nothing for 10 minutes.
   </Card>
 </CardGrid>
 
@@ -118,22 +83,22 @@ Not every alert is a simple threshold comparison. A robust IoT system needs seve
 <InArticleAd />
 
 
-We will build an alert engine that subscribes to MQTT topics, evaluates rules defined in a JSON configuration file, tracks sustained conditions, enforces cooldown periods, and dispatches notifications through multiple channels.
+The alert engine subscribes to MQTT topics and reads its rules from a JSON file. For each rule it remembers how long the condition has lasted, and it stays quiet for a set time after an alert (the cooldown), so that one long event does not send a message with every reading.
 
 ### Architecture Overview
 
-```
+```text
 ┌─────────────┐     ┌──────────────┐     ┌───────────────┐
-│ MQTT Broker  │────▶│ Alert Engine │────▶│ Notifications │
-│ (Mosquitto)  │     │  (Python)    │     │ Email/SMS/    │
-└─────────────┘     │              │     │ Discord/Slack/│
-                     │  Rules JSON  │     │ Telegram      │
-                     └──────────────┘     └───────────────┘
+│ MQTT Broker │────►│ Alert Engine │────►│ Notifications │
+│ (Mosquitto) │     │  (Python)    │     │ Email/SMS/    │
+└─────────────┘     │  Rules JSON  │     │ Discord/Slack/│
+                    └──────────────┘     │ Telegram      │
+                                         └───────────────┘
 ```
 
 ### Rule Configuration Format
 
-Each rule is a JSON object that specifies what to watch, what condition triggers the alert, how long the condition must persist, the cooldown period, and what actions to take.
+Each rule is a JSON object. It holds the four choices in a form the engine can read, except escalation, which this small engine does not have.
 
 ```json title="rules.json"
 {
@@ -199,13 +164,34 @@ Each rule is a JSON object that specifies what to watch, what condition triggers
 | `topic` | MQTT topic to subscribe to (supports wildcards) |
 | `field` | JSON key to extract from the payload (`null` for inactivity) |
 | `operator` | Comparison: `>`, `<`, `>=`, `<=`, `==`, `!=`, `rate_below`, `rate_above`, `inactivity` |
-| `threshold` | The value to compare against |
+| `threshold` | The value to compare against. For `rate_below` and `rate_above` it is the change in value inside `rate_window_seconds` (for example, `-10.0` means a drop of 10 units within the window). For `inactivity` it is the silent time in seconds |
 | `sustained_seconds` | How long the condition must persist before firing (0 = instant) |
 | `cooldown_seconds` | Minimum time between repeated alerts for the same rule |
 | `severity` | `info`, `warning`, `critical` |
 | `actions` | List of notification channels to use |
 
 ### The Alert Engine
+
+The class below keeps the memory of one rule. For each new reading, `check_condition` and `should_fire` ask three questions in this order:
+
+```text
+  ┌────────────────┐
+  │ temp > 35 C ?  │──NO──► reset the timer
+  └───────┬────────┘
+          │ YES
+          ▼
+  ┌────────────────┐
+  │ for 30 s ?     │──NO──► wait for the next reading
+  └───────┬────────┘
+          │ YES
+          ▼
+  ┌────────────────┐
+  │ in cooldown ?  │──YES─► stay quiet
+  └───────┬────────┘
+          │ NO
+          ▼
+    send the alert
+```
 
 ```python title="alert_engine.py"
 import json
@@ -254,15 +240,13 @@ class AlertState:
         ]
 
     def compute_rate(self):
-        """Compute the rate of change over the configured window."""
+        """Compute the change in value across the configured window
+        (newest value minus the oldest value still inside the window)."""
         if len(self.value_history) < 2:
             return 0.0
         oldest_t, oldest_v = self.value_history[0]
         newest_t, newest_v = self.value_history[-1]
-        dt = newest_t - oldest_t
-        if dt == 0:
-            return 0.0
-        return (newest_v - oldest_v) / dt
+        return newest_v - oldest_v
 
     def check_condition(self, now):
         """
@@ -340,6 +324,8 @@ class AlertState:
 ```
 
 ### Processing MQTT Messages
+
+The second class connects to the broker and passes each message to every rule whose topic matches. A separate thread wakes every 30 seconds to check the inactivity rules, because silence sends no message that could start a check.
 
 ```python title="alert_engine.py (continued)"
 class AlertEngine:
@@ -488,12 +474,18 @@ class AlertEngine:
                         state.mark_fired(now)
 ```
 
+:::caution[What this engine does not catch]
+- A device that was already silent when the engine started. The inactivity rule counts from the first message it sees, so it never reports a device it has never heard.
+- Its own failure. The memory of every rule is lost at a restart, and an engine that has stopped sends nothing. Watch the engine from another machine.
+- A person who does not answer. There is no escalation here.
+:::
+
 ## Notification Channels
 
 <InArticleAd />
 
 
-Now we implement the functions that actually deliver notifications. Each function takes the same two arguments: `alert_data` (a dict with all alert details) and `message` (a pre-formatted string).
+Each file below has the same shape: settings at the top, then one function that builds the text and makes one network call. Every function takes `alert_data` (a dict with the alert details) and `message` (a ready text). The settings are placeholders. Read real ones from environment variables, as the Slack file does, and never save them in a file that others can read.
 
 ### Email via SMTP
 
@@ -548,7 +540,7 @@ def send_email(alert_data, message):
 ```
 
 :::tip[Gmail App Passwords]
-If you use Gmail, enable 2-factor authentication on your Google account, then generate an App Password at [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords). Use the app password instead of your real password. Never put credentials directly in source code; use environment variables or a secrets manager.
+If you use Gmail, enable 2-factor authentication on your Google account, then generate an App Password at [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords). Use the app password, never your real password.
 :::
 
 ### SMS via Twilio
@@ -726,6 +718,8 @@ def send_telegram(alert_data, message):
 
 ### Wiring It All Together
 
+The main file gives each channel a name. These are the names used in the `actions` list of a rule.
+
 ```python title="main.py"
 from alert_engine import AlertEngine
 from notifiers.email_notifier import send_email
@@ -790,7 +784,7 @@ for i in $(seq 1 12); do
 done
 ```
 
-You should see the alert engine print the alert and dispatch notifications after the sustained period elapses.
+The single message of the first test only starts the 30-second timer. The loop of the second test keeps the value above the limit long enough, and the engine prints the alert and sends the notifications.
 
 ## SiliconWit.io Alert System
 
@@ -819,21 +813,12 @@ If you do not want to run your own alert engine, [SiliconWit.io](https://silicon
 The free tier supports up to 3 alert rules with email notifications. Upgrade for SMS, webhooks, escalation chains, and unlimited rules.
 :::
 
-**When to use SiliconWit.io alerts vs. a custom engine:**
-
-| Scenario | Recommended Approach |
-|----------|---------------------|
-| Quick prototype, few devices | SiliconWit.io (zero setup) |
-| Complex custom logic, many rules | Custom Python engine |
-| Visual automation with hardware actions | Node-RED |
-| Alerts tied to dashboard panels | Grafana alerting |
-
 ## Node-RED: Visual Flow-Based Automation
 
 <InArticleAd />
 
 
-Node-RED is an open-source, browser-based flow editor built on Node.js. You build automation logic by wiring together "nodes" on a canvas. Each node performs one task: receive an MQTT message, evaluate a condition, format a payload, send an HTTP request. The visual approach makes it fast to prototype and easy for non-programmers to understand.
+Node-RED is an open-source flow editor that runs in the browser. You build a rule by joining "nodes" with wires on a canvas. Each node does one task: receive an MQTT message, test a condition, format a text, send an HTTP request. A person who does not program can read the result.
 
 ### Installing Node-RED
 
@@ -875,7 +860,7 @@ sudo systemctl start nodered
 
 ### Core Nodes for IoT Automation
 
-Before building a flow, here are the nodes you will use most often.
+These are the nodes you will use most often.
 
 | Node | Category | Purpose |
 |------|----------|---------|
@@ -886,19 +871,44 @@ Before building a flow, here are the nodes you will use most often.
 | **change** | Function | Set, change, or delete message properties |
 | **http request** | Network | Make HTTP GET/POST requests (webhooks, APIs) |
 | **email** | Social | Send email via SMTP |
-| **debug** | Output | Print messages to the debug sidebar |
-| **inject** | Input | Manually trigger a flow for testing |
+| **debug** | Common | Print messages to the debug sidebar |
+| **inject** | Common | Manually trigger a flow for testing |
 | **delay** | Function | Throttle, rate-limit, or delay messages |
 
 ### Building a Complete Automation Flow
 
-We will build a flow that does the following:
+The flow has this shape: one input, one test, and three outputs.
+
+```text
+  ┌──────────┐   ┌──────────┐   ┌─────────┐
+  │ MQTT In  │──►│ Function │──►│ Switch  │
+  │ (sensor/ │   │ (parse   │   │ (temp   │
+  │  temp)   │   │  JSON)   │   │  > 35?) │
+  └──────────┘   └──────────┘   └────┬────┘
+                                     │
+                          ┌──────────┼──────────┐
+                          ▼          ▼          ▼
+                     ┌────────┐ ┌────────┐ ┌───────┐
+                     │ Slack  │ │ Email  │ │ MQTT  │
+                     │ notify │ │ alert  │ │ Out   │
+                     └────────┘ └────────┘ │(actua-│
+                                           │ tor)  │
+                                           └───────┘
+```
+
+The flow you build does the following:
 
 1. Subscribes to `sensors/greenhouse/temperature`
 2. Parses the JSON payload
 3. Checks if temperature exceeds 35 C
 4. If exceeded: sends a Slack notification AND publishes an MQTT command to turn on a ventilation fan
 5. If normal: publishes an MQTT command to turn the fan off
+
+:::caution[The fan must not depend on this flow]
+A message from a server can be late, and when the network or the Node-RED computer stops, no command arrives. So the fan controller keeps its own thermostat and limits in its firmware and works with no network. A rule on a server is for what one device cannot know (another device's reading, a person's decision), for oversight, alerts and records.
+
+A `fan_on` that was published is not a fan that turns. Let the controller report its state, and alert when the report does not come. Never let a rule restart a machine that people may be working on, or reopen a gas valve. Those need a person at the place.
+:::
 
 #### Step 1: MQTT Input Node
 
@@ -941,7 +951,7 @@ Connect a **switch** node after the function node. Configure it to route on the 
 | Output 1 | `msg.exceeded` is true |
 | Output 2 | `msg.exceeded` is false |
 
-This gives you two output wires: one for the "alert" path and one for the "normal" path.
+Output 1 is the alert path and output 2 the normal path.
 
 #### Step 4: Alert Path (Slack + Fan ON)
 
@@ -974,11 +984,11 @@ From **Output 2** of the switch node, add a **change** node that sets `msg.paylo
 
 #### Step 6: Debug Nodes
 
-Add **debug** nodes to the output of each path so you can see messages flowing through the system in the Node-RED debug sidebar.
+Add a **debug** node to the output of each path, so that you can see the messages in the Node-RED debug sidebar.
 
 ### Exporting the Flow
 
-Once your flow is working, click the menu (three horizontal lines in the top right), then **Export** to get the JSON representation. Here is the complete flow:
+When the flow works, click the menu (top right), then **Export**, to get it as JSON. This is the complete flow:
 
 ```json title="node-red-flow.json"
 [
@@ -1075,18 +1085,18 @@ Once your flow is working, click the menu (three horizontal lines in the top rig
 ]
 ```
 
-To import this flow: open Node-RED, click the menu, **Import**, paste the JSON, and click **Import**. Update the broker credentials and Slack webhook URL to match your setup.
+To import this flow, click the menu, **Import**, and paste the JSON. Then set your own broker credentials and Slack webhook URL.
 
 ## Automation Patterns
 
 <InArticleAd />
 
 
-Simple threshold alerts cover the basics, but production systems need more sophisticated patterns to avoid false positives and handle edge cases.
+A plain limit sends false alerts in some common cases. These patterns remove them.
 
 ### Hysteresis (Preventing Flapping)
 
-A sensor reading that hovers around the threshold will cause the alert to fire and clear repeatedly, sending a flood of notifications. Hysteresis solves this by using two thresholds: a high threshold to trigger the alert and a lower threshold to clear it.
+A reading that stays close to the limit crosses it again and again, and each crossing sends a message. Hysteresis uses two limits: a higher one to start the alert and a lower one to clear it. A room thermostat works the same way: it starts the heater a little below the set temperature and stops it a little above, or the heater would switch on and off every few seconds.
 
 ```python title="hysteresis_example.py"
 class HysteresisAlert:
@@ -1126,11 +1136,11 @@ Output:
   Temp=32.9C -> CLEARED
 ```
 
-Without hysteresis, the values 35.1, 34.8, 35.2 would cause trigger, clear, trigger in rapid succession. With hysteresis, the alert triggers once at 35.1 and does not clear until the temperature drops below the reset threshold of 33 C.
+Without hysteresis, the values 35.1, 34.8, 35.2 would start, clear and start the alert again. With it, the alert starts once at 35.1 and clears only below 33 C.
 
 ### Dead-Band
 
-A dead-band is similar to hysteresis but symmetrical. It defines a "no action" zone around a setpoint. This is common in HVAC systems where you want the heater to turn on below 20 C and the cooler to turn on above 25 C, with a dead band between 20 and 25 where neither runs.
+A dead-band is a zone around the target value where nothing acts. A heating and cooling system turns the heater on below 20 C and the cooler on above 25 C, and between 20 and 25 neither runs. In a real system this logic runs in the firmware of the controller. It is shown in Python here to make the idea clear.
 
 ```python title="dead_band_example.py"
 class DeadBandController:
@@ -1151,7 +1161,7 @@ class DeadBandController:
         elif value > self.high:
             new_state = "cooling"
         else:
-            new_state = self.state  # Stay in current state (dead band)
+            new_state = "idle"  # Dead band: neither heater nor cooler runs
 
         changed = (new_state != self.state)
         self.state = new_state
@@ -1169,7 +1179,7 @@ Some automations are time-based, not data-based. Node-RED's **inject** node can 
 | Monday 09:00 | Generate and email a weekly sensor summary |
 | Sunset (calculated) | Turn on outdoor lights |
 
-In Python, use the `schedule` library or system cron jobs:
+In Python, use the `schedule` library or system cron jobs. Notice that the irrigation command carries its duration: the device must close the valve by itself after 30 minutes, because the message that would stop it may never arrive.
 
 ```python title="scheduled_action.py"
 import schedule
@@ -1178,6 +1188,7 @@ import paho.mqtt.client as mqtt
 
 client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
 client.connect("localhost", 1883)
+client.loop_start()  # Background thread keeps the connection alive between jobs
 
 def morning_irrigation():
     """Turn on the irrigation system every morning."""
@@ -1207,7 +1218,7 @@ while True:
 
 ### If-Then Rules in Node-RED
 
-For more complex if-then logic, Node-RED's switch node supports multiple conditions chained together. You can also nest function nodes for compound conditions that are difficult to express with the visual switch node.
+Some conditions need two values at once. A function node expresses them more easily than the visual switch node.
 
 ```javascript title="Function node: compound condition"
 // Only alert if temperature is high AND humidity is low
@@ -1231,7 +1242,7 @@ return null;  // Drop message if condition not met
 <InArticleAd />
 
 
-If you already have Grafana dashboards from Lesson 4, you can add alert rules directly to your dashboard panels. This is convenient because the alert definition lives alongside the visualization.
+If you already have Grafana dashboards, you can add an alert rule to a panel, so that the rule sits beside the chart it watches.
 
 ### Creating a Grafana Alert Rule
 
@@ -1246,16 +1257,16 @@ If you already have Grafana dashboards from Lesson 4, you can add alert rules di
 
 5. **Set the evaluation interval.** How often Grafana checks the condition. Every 10 seconds is reasonable for real-time monitoring.
 
-6. **Set the "for" duration.** This is equivalent to our "sustained_seconds" in the Python engine. A "for" duration of 30 seconds means the condition must be true for 30 consecutive evaluations before the alert fires.
+6. **Set the "for" duration.** This is the "sustained_seconds" of the Python engine. With 30 seconds, the condition must stay true for 3 checks at a 10-second interval before the alert fires.
 
-7. **Configure contact points.** Go to **Alerting > Contact Points** in the Grafana sidebar. Add a contact point for each notification channel (email, Slack webhook, Discord webhook, etc.). Then assign the contact point to your alert rule.
+7. **Configure contact points.** Go to **Alerting > Contact Points** in the Grafana sidebar. Add a contact point for each channel (email, Slack webhook, Discord webhook), then assign it to your alert rule.
 
 8. **Save the dashboard.**
 </Steps>
 
 ### Grafana Alert Limitations
 
-Grafana alerting is powerful but has constraints you should know about.
+Grafana alerting has limits that you should know.
 
 | Limitation | Impact |
 |-----------|--------|
@@ -1275,12 +1286,12 @@ For simple "value above X" alerts, Grafana works well. For anything more complex
 <CardGrid>
   <Card title="Custom Python Engine" icon="seti:python">
     **Best for:** Complex rules, custom logic, large-scale deployments.
-    Full control over every aspect: rule evaluation, notification formatting, state management, database logging. Requires you to write and maintain the code, handle restarts, and manage dependencies. Most flexible but most effort.
+    You control every part: rules, message format, state, logging. You also write and maintain the code and handle restarts. Most flexible, most effort.
   </Card>
 
   <Card title="Node-RED" icon="seti:json">
     **Best for:** Visual prototyping, hardware automation, non-programmer teams.
-    Drag-and-drop flow editor with hundreds of community nodes. Great for wiring MQTT inputs to HTTP outputs, toggling relays, and building dashboards. Less suited for complex stateful logic or very large rule sets.
+    A visual flow editor with hundreds of community nodes. Good for joining MQTT inputs to HTTP outputs and device commands. Less suited to rules with much memory or to very large rule sets.
   </Card>
 
   <Card title="SiliconWit.io Alerts" icon="star">
@@ -1290,7 +1301,7 @@ For simple "value above X" alerts, Grafana works well. For anything more complex
 
   <Card title="Grafana Alerting" icon="seti:config">
     **Best for:** Teams already using Grafana dashboards, alert-on-chart workflows.
-    Alerts are defined alongside visualizations. Good for threshold and range conditions on time-series data. Requires data to already be in a supported database (InfluxDB, Prometheus, etc.). Not designed for real-time MQTT-driven automation.
+    The rule sits beside the chart. Good for limits and ranges on stored data. The data must already be in a database (InfluxDB, Prometheus). Not made for automation driven by live MQTT messages.
   </Card>
 </CardGrid>
 
@@ -1307,7 +1318,7 @@ For simple "value above X" alerts, Grafana works well. For anything more complex
 | Scalability | High | Medium | High | Medium |
 | Cost | Free | Free | Free tier / paid | Free |
 
-For this course, we recommend starting with SiliconWit.io for quick wins, then building the Python engine when you need custom logic, and using Node-RED when your automation involves physical actuators like fans, valves, or relays that respond to MQTT commands.
+For this course, start with SiliconWit.io, build the Python engine when you need custom logic, and use Node-RED when a rule must send MQTT commands to fans, valves or relays. In every case the device keeps its own limits.
 
 ## Exercises
 
@@ -1326,8 +1337,7 @@ Build a complete alert system using the Python engine from this lesson.
 
 **Deliverables:**
 - Your `rules.json` file
-- Screenshot of notifications arriving on your chosen channels
-- Terminal output showing the alert engine detecting sustained conditions and cooldown enforcement
+- Terminal output that shows the duration and the cooldown at work
 
 ### Exercise 2: Node-RED Automation with Actuator Control
 
@@ -1341,9 +1351,8 @@ Build a Node-RED flow that monitors two sensors and controls two actuators.
 - Send a summary notification to Slack or Discord whenever any actuator state changes
 
 **Deliverables:**
-- Export your Node-RED flow JSON
-- Screenshot of the flow in the Node-RED editor
-- Debug sidebar output showing messages flowing through both paths
+- Your exported Node-RED flow JSON
+- Debug sidebar output with messages on both paths
 
 ### Exercise 3: SiliconWit.io Alert Configuration
 
@@ -1356,29 +1365,27 @@ Set up alerts on the SiliconWit.io platform for your sensor data.
 - Test by publishing data above the threshold and by stopping your device to trigger inactivity
 
 **Deliverables:**
-- Screenshots of the alert configuration on SiliconWit.io
-- Screenshot of the notification arriving on your webhook channel
-- Brief comparison: what was easier or harder compared to the Python engine?
+- Screenshot of the notification in your webhook channel
+- Short comparison: what was easier or harder than the Python engine?
 
 ### Exercise 4: Grafana Alert with Escalation
 
 Create a Grafana alert rule and simulate an escalation workflow.
 
 **Requirements:**
-- Add an alert rule to a Grafana dashboard panel from Lesson 4
+- Add an alert rule to one of your Grafana dashboard panels
 - Configure two contact points: a Slack/Discord webhook for the initial alert and an email for escalation
 - Set the alert to fire after 30 seconds of sustained condition
 - Set a second alert rule on the same panel with a higher threshold (e.g., 40 C) that triggers the email escalation contact point
 - Document the difference between Grafana's "for" duration and the Python engine's `sustained_seconds`
 
 **Deliverables:**
-- Screenshot of the Grafana alert rule configuration
-- Screenshot of both notifications (webhook and email) firing during the test
-- Written explanation of how Grafana's alert state machine works (Pending, Firing, Resolved) compared to the Python engine's state tracking
+- Screenshot of both notifications (webhook and email) during the test
+- A written comparison of Grafana's alert states (Pending, Firing, Resolved) with the state kept by the Python engine
 
 ---
 
-**Next lesson:** [Device Security, TLS, and Provisioning](./device-security-tls-provisioning). You will generate X.509 certificates, configure mutual TLS on your MQTT connections, and build a device provisioning workflow that assigns unique identities to each node in your IoT network.
+**Next lesson:** [Device Security, TLS, and Provisioning](/education/iot-systems/device-security-tls-provisioning/). You will give each device its own certificate, so that the broker knows which device is speaking.
 
 <IoTSystemsComments />
 

@@ -25,11 +25,11 @@ import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/sta
 
 import IoTSystemsComments from '../../../../components/iot-systems/IoTSystemsComments.astro';
 
-Individual subsystems that work perfectly in isolation have a habit of falling apart when combined. A broker that handles three test clients chokes when TLS, Telegraf, Node-RED, and a Flask API all compete for connections. A dashboard that looks great on synthetic data shows nothing when real sensor payloads arrive with unexpected field names. Production readiness means every component has been tested together, failures are detected automatically, and the system recovers without human intervention. This capstone pulls together protocol selection, broker configuration, multi-MCU MQTT clients, time-series storage, REST APIs, alert automation, and device security into a single greenhouse monitoring deployment with three sensor nodes, live Grafana dashboards, Slack alerts, and cloud forwarding to SiliconWit.io. #IoT #Production #Capstone
+Parts that each pass their own test often fail when they are joined. A broker that serves three test clients struggles when Telegraf, Node-RED and an API connect as well. A dashboard that looks right with sample data shows nothing when a real payload uses another field name. And the hardest failure to see is a silent one: a node that stops at 03:12 sends no message to say so. In this capstone you join everything from the course into one greenhouse monitoring system with three sensor nodes, live dashboards, Slack alerts and a copy of the data on SiliconWit.io. Then you break it on purpose, to learn which failures it reports, which it recovers from, and which still need a person. #IoT #Production #Capstone
+
+This is what the finished system reports when one node stops:
 
 ```text
-  Production System Health Monitoring
-  ──────────────────────────────────────────
   Normal Operation:
   Node 1: ✓ online   25.3C   62% RH
   Node 2: ✓ online   24.8C   58% RH
@@ -38,111 +38,98 @@ Individual subsystems that work perfectly in isolation have a habit of falling a
   Failure Detection:
   Node 2: ✗ offline  (no msg in 5 min)
     │
-    ├──► Grafana: panel turns RED
-    ├──► Node-RED: status alert fires
-    ├──► Slack: "Node 2 offline at 03:12"
-    └──► Escalation: SMS after 15 min
-```
-
-```text
-  Docker Compose Service Map
-  ──────────────────────────────────────────
-  docker-compose.yml
-  ┌─────────────────────────────────────┐
-  │ mosquitto    :1883, :8883 (TLS)     │
-  │ telegraf     (internal, no port)    │
-  │ influxdb     :8086                  │
-  │ grafana      :3000                  │
-  │ nodered      :1880                  │
-  │ flask-api    :5000                  │
-  └─────────────────────────────────────┘
-         │
-  Shared Docker network: iot-net
-  Services reference each other by name:
-    telegraf ──► mosquitto (mqtt://mosquitto)
-    telegraf ──► influxdb (http://influxdb)
-    grafana  ──► influxdb (http://influxdb)
-    nodered  ──► mosquitto (mqtt://mosquitto)
+    ├──► Grafana: node leaves the status panel
+    ├──► Node-RED: inactivity alert fires
+    └──► Slack: "Node 2 offline at 03:12"
 ```
 
 ## System Overview
 
-The system monitors a greenhouse environment using three sensor nodes, each running on a different MCU platform. All data flows through a central Mosquitto broker secured with TLS and per-device credentials. Telegraf subscribes to MQTT topics and writes readings into InfluxDB. Grafana queries InfluxDB and renders live dashboards. A Flask REST API provides device listing, data queries, and command dispatch. Node-RED handles automation rules and alert routing. The Mosquitto broker also bridges selected topics to SiliconWit.io, giving you a cloud mirror of your data that remains accessible even when your local infrastructure is down.
+The system monitors a greenhouse with three sensor nodes, each on a different microcontroller:
+
+- All data passes through one Mosquitto broker, secured with TLS and a password for each device.
+- Telegraf subscribes to the MQTT topics and writes the readings into InfluxDB, and Grafana draws them.
+- A Flask REST API lists devices, serves history and publishes commands.
+- Node-RED checks the alert rules and sends the messages.
+- The broker also forwards the readings to SiliconWit.io. That copy can still be read when the local computer is down.
 
 ### Architecture
 
+The first drawing shows how readings arrive. Every node speaks only to the broker.
+
+```text
+┌──────────────┐
+│ ESP32 node   │──┐
+│ BME280, soil │  │
+└──────────────┘  │    ┌────────────┐
+┌──────────────┐  │    │ Mosquitto  │  to the local
+│ Pico W node  │──┼───►│ broker     │─► services
+│ light, PIR   │  │    │ TLS, ACLs  │
+└──────────────┘  │    └─────┬──────┘
+┌──────────────┐  │          │ MQTT bridge (TLS)
+│ STM32 node   │──┘          ▼
+│ air quality  │       ┌───────────────┐
+└──────────────┘       │ SiliconWit.io │
+                       └───────────────┘
 ```
-                    ┌───────────────────────────────────────────────────┐
-                    │              Local Infrastructure                 │
-                    │                                                   │
-┌─────────────┐    │  ┌────────────┐    ┌──────────┐    ┌───────────┐ │
-│ ESP32 Node  │────┼──│            │    │          │    │           │ │
-│ (BME280 +   │    │  │            │    │          │    │  Grafana  │ │
-│  Soil Moist)│    │  │ Mosquitto  │───>│ Telegraf │───>│InfluxDB   │ │
-│             │    │  │  Broker    │    │          │    │           │ │
-├─────────────┤    │  │  (TLS +    │    └──────────┘    └───────────┘ │
-│ Pico W Node │────┼──│   ACLs)    │                                   │
-│ (Light +    │    │  │            │───>┌──────────┐    ┌───────────┐ │
-│  PIR Motion)│    │  │            │    │ Node-RED │───>│  Slack /  │ │
-│             │    │  │            │    │ (alerts) │    │  Webhook  │ │
-├─────────────┤    │  │            │    └──────────┘    └───────────┘ │
-│ STM32 Node  │────┼──│            │                                   │
-│ (MQ-135 Air │    │  │            │───>┌──────────┐                   │
-│  Quality)   │    │  │            │    │ Flask API│                   │
-│             │    │  └─────┬──────┘    └──────────┘                   │
-└─────────────┘    │        │                                          │
-                    └────────┼──────────────────────────────────────────┘
-                             │
-                             │  MQTT Bridge (TLS)
-                             │
-                    ┌────────▼──────────────────┐
-                    │    SiliconWit.io Cloud     │
-                    │  (dashboard, alerts, API)  │
-                    └───────────────────────────┘
+
+The second drawing shows the local services that use the readings. The Flask API also reads history from InfluxDB and publishes commands back to the broker.
+
+```text
+               ┌──────────┐   ┌──────────┐   ┌─────────┐
+          ┌───►│ Telegraf │──►│ InfluxDB │──►│ Grafana │
+          │    └──────────┘   └──────────┘   └─────────┘
+┌───────┐ │    ┌──────────┐   ┌──────────┐
+│Broker │─┼───►│ Node-RED │──►│ Slack    │
+└───────┘ │    │ (alerts) │   │ webhook  │
+          │    └──────────┘   └──────────┘
+          │    ┌───────────┐
+          └───►│ Flask API │
+               └───────────┘
 ```
 
 ### System Components
 
 <CardGrid>
   <Card title="Sensor Node A: ESP32" icon="star">
-    Reads BME280 (temperature, humidity, pressure) and a capacitive soil moisture sensor. Publishes every 30 seconds with QoS 1. Implements exponential backoff on reconnection and buffers up to 60 readings in RTC memory when offline. **Skills from:** Lesson 3 (MQTT clients), ESP32 Course (peripherals, deep sleep).
+    Reads BME280 (temperature, humidity, pressure) and a capacitive soil moisture sensor. Publishes every 30 seconds with QoS 1. Waits longer before each new attempt to reconnect, and keeps up to 60 readings in RAM while offline.
   </Card>
 
   <Card title="Sensor Node B: Pico W" icon="star">
-    Reads an LDR light sensor via ADC and a PIR motion sensor via GPIO interrupt. Publishes light level every 30 seconds and motion events on change (edge triggered). **Skills from:** Lesson 3 (MQTT clients), RPi Pico Course (GPIO, ADC).
+    Reads an LDR light sensor via ADC and a PIR motion sensor on a GPIO input that the main loop polls. Publishes light level every 30 seconds and motion events on change (edge triggered).
   </Card>
 
   <Card title="Sensor Node C: STM32 + ESP-01" icon="star">
-    Reads an MQ-135 air quality sensor via ADC. Publishes air quality index every 30 seconds. The STM32 communicates with the ESP-01 over UART using AT commands. **Skills from:** Lesson 3 (MQTT clients), STM32 Course (UART, ADC).
+    Reads an MQ-135 air quality sensor via ADC. Publishes air quality index every 30 seconds. The STM32 communicates with the ESP-01 over UART using AT commands.
   </Card>
 
   <Card title="Mosquitto Broker" icon="setting">
-    TLS 1.2 with server certificates, password authentication, topic ACLs that restrict each device to its own publish prefix, persistent sessions, and an MQTT bridge that forwards all sensor data to SiliconWit.io. **Skills from:** Lesson 2 (broker setup), Lesson 7 (TLS and security).
+    TLS 1.2 with server certificates, password authentication, topic ACLs that restrict each device to its own publish prefix, persistent sessions, and an MQTT bridge that forwards all sensor data to SiliconWit.io.
   </Card>
 
   <Card title="Telegraf + InfluxDB" icon="document">
-    Telegraf subscribes to `greenhouse/#` and writes every message into an InfluxDB bucket with 30-day retention. InfluxDB provides the query engine for both Grafana and the REST API. **Skills from:** Lesson 4 (dashboards and data).
+    Telegraf subscribes to `greenhouse/#` and writes every message into an InfluxDB bucket with 30-day retention. Grafana and the REST API both query InfluxDB.
   </Card>
 
   <Card title="Grafana Dashboard" icon="approve-check">
-    Panels for temperature, humidity, pressure, soil moisture, light, motion events, air quality, device online/offline status, and alert history. Auto-refreshes every 10 seconds. **Skills from:** Lesson 4 (dashboards and data).
+    Panels for temperature, humidity, pressure, soil moisture, light, motion events, air quality, device online/offline status, and alert history. Refreshes every 10 seconds.
   </Card>
 
   <Card title="Flask REST API" icon="document">
-    Endpoints for listing devices, querying historical data, and dispatching commands to nodes (such as changing the publish interval). Secured with API keys. **Skills from:** Lesson 5 (REST APIs and webhooks).
+    Endpoints for listing devices, querying historical data, and dispatching commands to nodes (such as changing the publish interval). Secured with API keys.
   </Card>
 
   <Card title="Node-RED Alerts" icon="warning">
-    Threshold alerts (temperature above 35C, humidity below 20%), inactivity alerts (no data from a node for 5 minutes), and notifications via Slack webhook. **Skills from:** Lesson 6 (alerts and automation).
+    Threshold alerts (temperature above 35C, humidity below 20%), inactivity alerts (no data from a node for 5 minutes), and notifications via Slack webhook.
   </Card>
 
   <Card title="SiliconWit.io Cloud" icon="rocket">
-    Data forwarded via MQTT bridge appears on SiliconWit.io dashboards automatically. Students can monitor their greenhouse remotely even when the local Grafana instance is unreachable. **Skills from:** Lesson 2 (broker bridging).
+    Data forwarded via MQTT bridge appears on SiliconWit.io dashboards automatically. You can see the greenhouse from another place, even when the local Grafana cannot be reached.
   </Card>
 </CardGrid>
 
 :::tip[Instrument it]
-Placement decides whether the readings are real. Put a capacitive soil moisture probe (not a resistive one, it corrodes) in the root zone, set back from the dripper so it reads the bed and not the last watering, and keep air temperature and humidity at canopy height in a small radiation shield, shaded from sun and clear of vents. Good, cheap parts: an SHT31 or BME280 for temperature and humidity, a BH1750 for light in lux (far better than a bare LDR), and an SCD41 if you want true CO2. An [ESP32](/education/sensor-actuator-interfacing-stm32/) reads them all over I2C, and once the node earns a small board it can do more than watch: [stream](/education/iot-systems/) to a live [dashboard](https://siliconwit.io) and close the loop, watering when the bed dries and venting when it overheats.
+Placement decides whether the readings are real. Put a capacitive soil moisture probe (not a resistive one, it corrodes) in the root zone, away from the dripper, so that it reads the bed and not the last watering. Keep air temperature and humidity at the height of the leaves, in a small shield, shaded from the sun and clear of vents. Good, cheap parts: an SHT31 or BME280 for temperature and humidity, a BH1750 for light in lux (far better than a bare LDR), and an SCD41 if you want true CO2. An [ESP32](/education/sensor-actuator-interfacing-stm32/) reads them all over I2C. The node itself can water when the bed dries and vent when the air overheats, with its own limits in its firmware, while it [streams](/education/iot-systems/) the readings to a live [dashboard](https://siliconwit.io) for oversight.
 :::
 
 ## MQTT Topic Hierarchy
@@ -150,7 +137,7 @@ Placement decides whether the readings are real. Put a capacitive soil moisture 
 <InArticleAd />
 
 
-A well-structured topic hierarchy keeps the system organized and makes ACLs straightforward. Every sensor node publishes under `greenhouse/<node-id>/`, and status topics use retained messages with last will.
+A clear topic plan makes the access rules simple. Every sensor node publishes under `greenhouse/<node-id>/`. Each status topic is retained (the broker keeps the last message for new subscribers) and has a last will (a message the broker publishes for a node that disappears).
 
 ```
 greenhouse/esp32-node/temperature     "23.5"        (Celsius, QoS 1, retained)
@@ -171,7 +158,7 @@ greenhouse/cmd/[node-id]              (commands from API)
 
 **Design decisions:**
 
-- **Retained messages** on all sensor topics so that any new subscriber (Telegraf restarting, a new dashboard panel) immediately gets the last known value.
+- **Retained messages** on all sensor topics so that any new subscriber (Telegraf restarting, a new dashboard panel) immediately gets the last known value. That value can be hours old. Read the status topic before you trust it.
 - **QoS 1** for all publishes. QoS 0 risks silent data loss; QoS 2 adds round trips without meaningful benefit for sensor data where occasional duplicates are harmless.
 - **Per-node prefixes** make ACLs simple: each device credential is allowed to publish only under its own prefix.
 - **Command topics** use `greenhouse/cmd/<node-id>` so the REST API can dispatch configuration changes to specific nodes.
@@ -183,7 +170,7 @@ greenhouse/cmd/[node-id]              (commands from API)
 
 ### Mosquitto with TLS and ACLs
 
-The broker runs in a Docker container with TLS certificates, password authentication, and topic ACLs. This configuration was introduced in Lesson 2 and hardened in Lesson 7.
+The broker runs in a Docker container with TLS certificates, password authentication, and topic ACLs. The last block of the file is the bridge that forwards the readings to SiliconWit.io.
 
 ```ini title="mosquitto/mosquitto.conf"
 # Listener with TLS
@@ -223,6 +210,8 @@ notification_topic greenhouse/bridge/status
 
 ### ACL File
 
+Each user gets the least it needs. A node can write only under its own name and read only its own command topic, so a stolen node password lets a thief send false data as that one node and nothing more.
+
 ```text title="mosquitto/acl"
 # ESP32 node: publish to its own topics, subscribe to commands
 user esp32-node
@@ -251,6 +240,10 @@ topic write greenhouse/cmd/#
 # Node-RED: read all data
 user nodered
 topic read greenhouse/#
+
+# Docker health check: read broker statistics only
+user healthcheck
+topic read $SYS/#
 ```
 
 ### Password File
@@ -266,6 +259,8 @@ mosquitto_passwd mosquitto/passwd stm32-node
 mosquitto_passwd mosquitto/passwd telegraf
 mosquitto_passwd mosquitto/passwd api-server
 mosquitto_passwd mosquitto/passwd nodered
+# User for the Docker health check (the compose file uses this password)
+mosquitto_passwd -b mosquitto/passwd healthcheck healthcheck
 ```
 
 ## Node Firmware
@@ -275,7 +270,9 @@ mosquitto_passwd mosquitto/passwd nodered
 
 ### ESP32 Node (BME280 + Soil Moisture)
 
-This node reads temperature, humidity, and pressure from a BME280 over I2C, and soil moisture from a capacitive sensor on ADC. It publishes every 30 seconds with QoS 1. If the MQTT connection drops, it buffers readings in a ring buffer and publishes them when the connection recovers. Reconnection uses exponential backoff starting at 1 second and capping at 60 seconds (Lesson 3 pattern).
+This node reads temperature, humidity, and pressure from a BME280 over I2C, and soil moisture from a capacitive sensor on ADC. It publishes every 30 seconds with QoS 1. If the MQTT connection drops, it keeps readings in a ring buffer and publishes them when the connection returns. Before each new attempt to reconnect it waits twice as long as before, from 1 second up to 60 seconds, so that many nodes do not all call a recovering broker at the same moment.
+
+Most of the long listing reads the BME280. The parts to study are `buffer_reading`, `flush_buffer` and the MQTT event handler. Notice that the handler only logs a command that arrives: this node does not yet act on one.
 
 ```c title="esp32_node/main/main.c"
 #include <stdio.h>
@@ -287,6 +284,7 @@ This node reads temperature, humidity, and pressure from a BME280 over I2C, and 
 #include "esp_event.h"
 #include "nvs_flash.h"
 #include "mqtt_client.h"
+#include "wifi_connect.h"
 #include "driver/i2c.h"
 #include "driver/adc.h"
 
@@ -480,8 +478,9 @@ static void mqtt_event_handler(void *args, esp_event_base_t base,
         ESP_LOGW(TAG, "MQTT disconnected, backoff %d ms", backoff_ms);
         mqtt_connected = false;
         vTaskDelay(pdMS_TO_TICKS(backoff_ms));
-        if (backoff_ms < MAX_BACKOFF_MS) {
-            backoff_ms *= 2;
+        backoff_ms *= 2;
+        if (backoff_ms > MAX_BACKOFF_MS) {
+            backoff_ms = MAX_BACKOFF_MS;
         }
         break;
 
@@ -536,11 +535,10 @@ static void sensor_publish_task(void *pvParameters)
 void app_main(void)
 {
     nvs_flash_init();
-    esp_netif_init();
-    esp_event_loop_create_default();
 
-    /* Wi-Fi connect (use your wifi_connect() from Lesson 3) */
-    wifi_connect();
+    /* Wi-Fi connect: wifi_init_sta() from Lesson 3 (wifi_connect.c).
+       It also starts the network interface and the default event loop. */
+    wifi_init_sta();
 
     /* MQTT client setup */
     extern const uint8_t server_cert_pem_start[] asm("_binary_ca_crt_start");
@@ -576,16 +574,16 @@ void app_main(void)
 }
 ```
 
-**Key patterns from Lesson 3:**
-- Exponential backoff on disconnect (1s, 2s, 4s, ... up to 60s)
-- Offline ring buffer so readings are not lost during network outages
-- Buffer flush on reconnection, with a small delay between publishes to avoid flooding
+**Patterns to notice:**
+- A longer wait after each failed connection (1s, 2s, 4s, ... up to 60s)
+- A ring buffer of 60 readings, which is 30 minutes at one reading every 30 seconds. In a longer outage the oldest readings are overwritten, and a restart empties the buffer because it is in RAM
+- Buffer flush on reconnection, with a small delay between publishes. A payload is only a number, so the database stores a flushed reading with the time it arrived, not the time it was measured
 - Last will message set to "offline" so the broker notifies all subscribers if the node vanishes
 - Retained messages on all sensor topics so new subscribers get immediate data
 
 ### Pico W Node (Light + PIR Motion)
 
-The Pico W reads ambient light from an LDR on ADC0 and detects motion from a PIR sensor on GPIO 15. Light level is published every 30 seconds. Motion events are published on change only (edge triggered), reducing unnecessary traffic.
+The Pico W reads ambient light from an LDR on ADC0 and detects motion from a PIR sensor on GPIO 15. Light level is published every 30 seconds. Motion events are published on change only (edge triggered), which keeps the traffic low. This node acts on one command, a new publish interval, and sends no reply to say that it did.
 
 ```python title="pico_node/main.py"
 import network
@@ -682,8 +680,7 @@ def mqtt_connect():
     except Exception as e:
         print("MQTT connect failed:", e, "backoff:", backoff_s)
         time.sleep(backoff_s)
-        if backoff_s < MAX_BACKOFF:
-            backoff_s *= 2
+        backoff_s = min(backoff_s * 2, MAX_BACKOFF)
         return None
 
 def main():
@@ -784,7 +781,8 @@ static int esp_mqtt_connect(const char *broker, uint16_t port,
 {
     char cmd[256];
     snprintf(cmd, sizeof(cmd),
-             "AT+MQTTUSERCFG=0,1,\"%s\",\"%s\",\"%s\",0,0,\"\"",
+             /* Scheme 2 = MQTT over TLS (the broker listens on 8883 only) */
+             "AT+MQTTUSERCFG=0,2,\"%s\",\"%s\",\"%s\",0,0,\"\"",
              client_id, user, pass);
     esp_send_cmd(cmd, "OK", 2000);
 
@@ -849,7 +847,8 @@ int main(void)
                                       "stm32-node", "your_password");
         if (!connected) {
             HAL_Delay(backoff);
-            if (backoff < 60000) backoff *= 2;
+            backoff *= 2;
+            if (backoff > 60000) backoff = 60000;
         }
     }
 
@@ -873,7 +872,7 @@ int main(void)
 <InArticleAd />
 
 
-Telegraf subscribes to all `greenhouse/#` topics and writes each message into InfluxDB. This was covered in Lesson 4. Here is the full configuration for the production system.
+Telegraf subscribes to all `greenhouse/#` topics and writes each message into InfluxDB. This is the full configuration.
 
 ```toml title="telegraf/telegraf.conf"
 # Global agent configuration
@@ -897,16 +896,21 @@ Telegraf subscribes to all `greenhouse/#` topics and writes each message into In
   tls_ca = "/etc/telegraf/certs/ca.crt"
   insecure_skip_verify = false
 
+  # Data format: each payload is one number sent as plain text.
+  # These two lines must come BEFORE the topic_parsing table: in TOML,
+  # every key after a table header belongs to that table.
+  # Text payloads (status, commands) are not numbers; Telegraf logs a
+  # parse error for them and skips them.
+  data_format = "value"
+  data_type = "float"
+
   # Parse topic to extract node and metric
   # Topic format: greenhouse/<node>/<metric>
+  # The measurement name becomes "greenhouse"
   [[inputs.mqtt_consumer.topic_parsing]]
     topic = "greenhouse/+/+"
     measurement = "measurement/_/_"
     tags = "_/node/metric"
-
-  # Data format: plain string values
-  data_format = "value"
-  data_type = "float"
 
 # InfluxDB v2 output
 [[outputs.influxdb_v2]]
@@ -940,7 +944,7 @@ option task = {name: "downsample_hourly", every: 1h}
 
 from(bucket: "sensor_data")
   |> range(start: -1h)
-  |> filter(fn: (r) => r._measurement == "mqtt_consumer")
+  |> filter(fn: (r) => r._measurement == "greenhouse")
   |> aggregateWindow(every: 1h, fn: mean, createEmpty: false)
   |> to(bucket: "sensor_data_longterm", org: "greenhouse")
 ```
@@ -954,7 +958,7 @@ The Grafana dashboard has panels organized into rows: one row per sensor node, p
 
 ### Dashboard JSON (Key Panels)
 
-Rather than listing the entire JSON, here are the Flux queries for each major panel. Import these into Grafana by creating a new dashboard and adding panels with InfluxDB (Flux) as the data source.
+These are the Flux queries for the main panels. Create a new dashboard and add a panel for each, with InfluxDB (Flux) as the data source.
 
 ```flux title="Panel: Temperature (ESP32 Node)"
 from(bucket: "sensor_data")
@@ -997,11 +1001,13 @@ from(bucket: "sensor_data")
 ```
 
 ```flux title="Panel: Device Status (all nodes)"
+// A node that sent any reading in the last 5 minutes is listed (online).
+// A node that is missing from the result is offline.
 from(bucket: "sensor_data")
   |> range(start: -5m)
-  |> filter(fn: (r) => r.metric == "status")
-  |> last()
+  |> filter(fn: (r) => r._measurement == "greenhouse")
   |> group(columns: ["node"])
+  |> last()
   |> yield(name: "status")
 ```
 
@@ -1025,7 +1031,7 @@ from(bucket: "sensor_data")
 <InArticleAd />
 
 
-The Flask API provides programmatic access to the system (Lesson 5 pattern). It queries InfluxDB for historical data and publishes commands to the broker for device control.
+The Flask API lets other programs use the system. It queries InfluxDB for history and publishes commands to the broker. Every endpoint except the health check needs an API key. Read `send_command` with care: it answers `sent` as soon as the broker has accepted the message.
 
 ```python title="api/app.py"
 import os
@@ -1054,7 +1060,10 @@ influx_client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_OR
 query_api = influx_client.query_api()
 
 # MQTT client for publishing commands
-mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="flask-api")
+# Each gunicorn worker is a separate process and needs its own client ID.
+# Two clients with the same ID disconnect each other again and again.
+mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
+                          client_id=f"flask-api-{os.getpid()}")
 mqtt_client.username_pw_set(MQTT_USER, MQTT_PASS)
 mqtt_client.tls_set(ca_certs="/app/certs/ca.crt")
 mqtt_client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
@@ -1181,12 +1190,20 @@ curl -X POST -H "X-API-Key: your_api_key_here" \
      http://localhost:5000/api/devices/esp32-node/command
 ```
 
+:::caution[Sent is not done]
+The answer `"status": "sent"` means that the broker accepted the command. It says nothing about the node: here the Pico W changes its interval and sends no reply, and the ESP32 only logs the command. To know that a command was done, watch the result (the time between readings), or better, let the node publish a reply and let the API wait for it. On SiliconWit.io a command goes to `d/<id>/c` and the device replies within 30 seconds on `d/<id>/k/<session>`.
+
+Use commands for settings such as an interval. A safety limit stays in the node, where it works with no network.
+:::
+
 ## Alerts and Automation
 
 <InArticleAd />
 
 
-Node-RED handles threshold alerts and inactivity detection (Lesson 6). The alert flow subscribes to all greenhouse topics and evaluates rules on every message.
+Node-RED checks the alert rules. The flow subscribes to all greenhouse topics and tests every message.
+
+A good alert needs four choices: the field, a limit that leaves time to act, how long the condition must last, and who is told next. This flow makes the first two. Add a duration and a second person before you depend on it (an exercise below adds escalation).
 
 ### Threshold Alerts
 
@@ -1201,7 +1218,9 @@ Node-RED handles threshold alerts and inactivity detection (Lesson 6). The alert
 
 ### Inactivity Alerts
 
-If no data arrives from a node for 5 minutes, Node-RED fires an inactivity alert. This catches scenarios where a node crashes silently without the MQTT last will firing (for example, if the node loses Wi-Fi but the TCP connection has not yet timed out at the broker).
+A node that has stopped cannot report its own silence, so Node-RED watches from outside: if no message arrives from a node for 5 minutes, it fires an inactivity alert.
+
+In the flow below, the first function records the time of the last message of each node, and a timer runs the inactivity check every 60 seconds. Each alert function compares one value with its limits and builds the Slack text.
 
 ```json title="nodered/flows.json (threshold + inactivity alert flow)"
 [
@@ -1211,12 +1230,14 @@ If no data arrives from a node for 5 minutes, Node-RED fires an inactivity alert
         "topic": "greenhouse/#",
         "broker": "mosquitto_broker",
         "qos": "1",
-        "name": "Greenhouse MQTT"
+        "name": "Greenhouse MQTT",
+        "wires": [["parse_topic"]]
     },
     {
         "id": "parse_topic",
         "type": "function",
         "name": "Parse Topic and Value",
+        "wires": [["threshold_check"]],
         "func": "const parts = msg.topic.split('/');\nmsg.node = parts[1];\nmsg.metric = parts[2];\nmsg.value = parseFloat(msg.payload);\nmsg.timestamp = Date.now();\n\n// Store last-seen timestamp per node\nconst ctx = global.get('lastSeen') || {};\nctx[msg.node] = msg.timestamp;\nglobal.set('lastSeen', ctx);\n\nreturn msg;"
     },
     {
@@ -1230,30 +1251,35 @@ If no data arrives from a node for 5 minutes, Node-RED fires an inactivity alert
             {"t": "eq", "v": "soil_moisture"},
             {"t": "eq", "v": "air_quality"}
         ],
-        "outputs": 4
+        "outputs": 4,
+        "wires": [["temp_alert"], ["humidity_alert"], ["soil_alert"], ["aqi_alert"]]
     },
     {
         "id": "temp_alert",
         "type": "function",
         "name": "Temperature Alert",
+        "wires": [["slack_webhook"]],
         "func": "if (msg.value > 35) {\n    msg.payload = {\n        text: `CRITICAL: Temperature is ${msg.value}C on ${msg.node} (threshold: 35C). Check greenhouse ventilation.`\n    };\n    return msg;\n}\nif (msg.value < 5) {\n    msg.payload = {\n        text: `CRITICAL: Temperature is ${msg.value}C on ${msg.node} (threshold: 5C). Check greenhouse heating.`\n    };\n    return msg;\n}\nreturn null;"
     },
     {
         "id": "humidity_alert",
         "type": "function",
         "name": "Humidity Alert",
+        "wires": [["slack_webhook"]],
         "func": "if (msg.value < 20) {\n    msg.payload = {\n        text: `WARNING: Humidity is ${msg.value}% on ${msg.node} (threshold: <20%). Consider misting.`\n    };\n    return msg;\n}\nif (msg.value > 90) {\n    msg.payload = {\n        text: `WARNING: Humidity is ${msg.value}% on ${msg.node} (threshold: >90%). Check for condensation.`\n    };\n    return msg;\n}\nreturn null;"
     },
     {
         "id": "soil_alert",
         "type": "function",
         "name": "Soil Moisture Alert",
+        "wires": [["slack_webhook"]],
         "func": "if (msg.value < 15) {\n    msg.payload = {\n        text: `WARNING: Soil moisture is ${msg.value}% on ${msg.node}. Water the plants.`\n    };\n    return msg;\n}\nreturn null;"
     },
     {
         "id": "aqi_alert",
         "type": "function",
         "name": "Air Quality Alert",
+        "wires": [["slack_webhook"]],
         "func": "if (msg.value > 150) {\n    msg.payload = {\n        text: `CRITICAL: Air quality index is ${msg.value} on ${msg.node} (threshold: 150). Open ventilation.`\n    };\n    return msg;\n}\nreturn null;"
     },
     {
@@ -1261,18 +1287,21 @@ If no data arrives from a node for 5 minutes, Node-RED fires an inactivity alert
         "type": "http request",
         "method": "POST",
         "url": "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK",
-        "name": "Send to Slack"
+        "name": "Send to Slack",
+        "wires": [[]]
     },
     {
         "id": "inactivity_check",
         "type": "inject",
         "repeat": "60",
-        "name": "Check Every 60s"
+        "name": "Check Every 60s",
+        "wires": [["inactivity_eval"]]
     },
     {
         "id": "inactivity_eval",
         "type": "function",
         "name": "Inactivity Detection",
+        "wires": [["slack_webhook"]],
         "func": "const ctx = global.get('lastSeen') || {};\nconst now = Date.now();\nconst threshold = 5 * 60 * 1000; // 5 minutes\nconst nodes = ['esp32-node', 'pico-node', 'stm32-node'];\nconst alerts = [];\n\nfor (const node of nodes) {\n    const lastSeen = ctx[node];\n    if (!lastSeen || (now - lastSeen) > threshold) {\n        alerts.push(node);\n    }\n}\n\nif (alerts.length > 0) {\n    msg.payload = {\n        text: `INACTIVITY ALERT: No data received from ${alerts.join(', ')} for over 5 minutes. Check device connectivity.`\n    };\n    return msg;\n}\nreturn null;"
     }
 ]
@@ -1280,7 +1309,7 @@ If no data arrives from a node for 5 minutes, Node-RED fires an inactivity alert
 
 ### Alert Deduplication
 
-To avoid alert storms (the same threshold firing every 30 seconds), add a rate limiter in each alert function. The pattern stores the last alert timestamp and suppresses duplicates within a cooldown window.
+As written, a temperature above the limit sends a Slack message every 30 seconds, and people stop reading a channel like that. Add a rate limiter to each alert function. It stores the time of the last alert and stays quiet for a cooldown time.
 
 ```javascript title="Rate limiter pattern (add to each alert function)"
 // At the top of each alert function, add:
@@ -1301,7 +1330,30 @@ flow.set(key, now);
 <InArticleAd />
 
 
-All backend services run in Docker containers. This makes deployment reproducible and portable. [Podman](https://podman.io) (fully open source, rootless, no daemon, no paid tiers) works as an alternative, though some inter-container networking and health check features may need minor adjustments with `podman-compose`.
+All backend services run in Docker containers, so the same files start the same system on another computer. [Podman](https://podman.io) (fully open source, rootless, no daemon, no paid tiers) works as an alternative, though networking between containers and health checks may need small changes with `podman-compose`.
+
+The services find each other by name on one shared Docker network:
+
+```text
+  docker-compose.yml
+  ┌─────────────────────────────────────┐
+  │ mosquitto    :8883 (TLS only)       │
+  │ telegraf     (internal, no port)    │
+  │ influxdb     :8086                  │
+  │ grafana      :3000                  │
+  │ nodered      :1880                  │
+  │ flask-api    :5000                  │
+  └─────────────────────────────────────┘
+         │
+  Shared default Docker network
+  Services reference each other by name:
+    telegraf ──► mosquitto (ssl://mosquitto)
+    telegraf ──► influxdb (http://influxdb)
+    grafana  ──► influxdb (http://influxdb)
+    nodered  ──► mosquitto (ssl://mosquitto)
+```
+
+In the file below, notice three things for each service: `restart: unless-stopped` starts it again after a crash, `healthcheck` tests that it really answers, and `depends_on` makes it wait for the services it needs.
 
 ```yaml title="docker-compose.yml"
 version: "3.8"
@@ -1505,7 +1557,7 @@ paho-mqtt>=2.0.0
 
 <Steps>
 1. **Generate TLS certificates.**
-   Use the certificate generation process from Lesson 7. Create a CA, then sign server and client certificates. Place all certificates in the `certs/` directory.
+   Use the process from [device security and provisioning](/education/iot-systems/device-security-tls-provisioning/). Create a CA, then sign server and client certificates. Place all certificates in the `certs/` directory.
 
    ```bash
    # Generate CA
@@ -1519,11 +1571,14 @@ paho-mqtt>=2.0.0
      -out certs/server.csr -subj "/CN=mosquitto"
    openssl x509 -req -in certs/server.csr -CA certs/ca.crt \
      -CAkey certs/ca.key -CAcreateserial \
-     -out certs/server.crt -days 365
+     -out certs/server.crt -days 365 \
+     -extfile <(printf "subjectAltName=DNS:mosquitto,DNS:localhost,IP:192.168.1.100")
    ```
 
+   The `subjectAltName` line lists every name that a client uses to reach the broker: `mosquitto` (the other containers), `localhost` (tests on the host and the health check), and the LAN address of the host (the sensor nodes). Replace `192.168.1.100` with the address of your Docker host. Without these names the TLS check fails, and Telegraf refuses a certificate that has only a Common Name.
+
 2. **Generate Mosquitto passwords.**
-   Run the `mosquitto_passwd` commands shown earlier to create credentials for all six users (three sensor nodes, Telegraf, the API server, and Node-RED).
+   Run the `mosquitto_passwd` commands shown earlier to create credentials for all seven users (three sensor nodes, Telegraf, the API server, Node-RED, and the Docker health check).
 
 3. **Configure your SiliconWit.io bridge credentials.**
    Log in to [siliconwit.io](https://siliconwit.io), create a device, and copy the MQTT username and token into `mosquitto.conf` under the bridge section.
@@ -1588,19 +1643,19 @@ paho-mqtt>=2.0.0
 <InArticleAd />
 
 
-A production system must handle failures gracefully. Run each of these tests and verify the expected behavior.
+You know how a system fails only after you have made it fail. Run each test and compare what happens with what is expected.
 
 ### Test 1: Unplug a Sensor Node
 
 Power off the ESP32 node by disconnecting its USB cable.
 
 **Expected behavior:**
-- The MQTT broker delivers the last will message ("offline") on `greenhouse/esp32-node/status` within the keep-alive timeout (30 seconds).
-- Grafana's device status panel shows the ESP32 node as offline.
-- After 5 minutes with no data, Node-RED's inactivity check fires a Slack notification.
+- The MQTT broker delivers the last will message ("offline") on `greenhouse/esp32-node/status` after one and a half times the keep-alive interval (45 seconds for the 30-second keep-alive).
+- Grafana's device status panel stops listing the ESP32 node once it has sent no data for 5 minutes.
+- About 6 to 7 minutes after the power is removed, Node-RED's inactivity check fires a Slack notification. The last will also counts as a message from the node, so the 5 minutes start there, and the check runs once a minute.
 - The Pico W and STM32 nodes continue publishing normally.
 
-**Recovery:** Reconnect the ESP32 node. It should reconnect to the broker (using exponential backoff if Wi-Fi or the broker is temporarily unreachable), publish "online" to the status topic, flush any buffered readings, and resume normal 30-second publishes.
+**Recovery:** Reconnect the ESP32 node. It reconnects to the broker, publishes "online" to the status topic, and publishes every 30 seconds again. Its buffer was in RAM, so the readings from before the power cut are gone.
 
 ### Test 2: Restart the Broker
 
@@ -1616,7 +1671,7 @@ docker compose restart mosquitto
 - Nodes reconnect, re-publish their "online" status, and resume publishing sensor data.
 - Telegraf also reconnects and resumes writing to InfluxDB.
 - The Grafana dashboard shows a brief gap in data (the duration of the broker restart) but otherwise continues normally.
-- Any readings that occurred during the downtime are buffered on the ESP32 node and flushed on reconnection.
+- The ESP32 node keeps the readings from the downtime in its buffer and publishes them on reconnection. The Pico W and STM32 nodes have no buffer, so their readings from that time are lost.
 
 ### Test 3: Kill Power to the Broker Host
 
@@ -1628,7 +1683,7 @@ This simulates a complete infrastructure failure. Shut down the entire Docker ho
 - You can log into [siliconwit.io](https://siliconwit.io) from any device and see the last known readings for all sensor nodes.
 - When the host comes back online, `docker compose up -d` starts all services. Sensor nodes reconnect, and data flow resumes.
 
-This test demonstrates the value of cloud forwarding: even with a complete local outage, you retain visibility through SiliconWit.io.
+With the whole local system down, you can still see the last readings on SiliconWit.io. Notice what you do not get: nothing on the dead host can tell you that it is dead. That message must come from outside it.
 
 ### Test 4: Network Partition
 
@@ -1639,33 +1694,29 @@ Disconnect the broker host from the internet (unplug the Ethernet cable or disab
 - Sensor nodes are on the same LAN, so they keep publishing to the local broker.
 - InfluxDB and Grafana continue receiving and displaying data.
 - When the internet connection is restored, the MQTT bridge reconnects to SiliconWit.io automatically.
-- Messages published during the outage are not retroactively forwarded (standard MQTT bridge behavior), but new messages resume immediately.
+- Messages published during the outage are queued by the local broker (the bridge topic uses QoS 1 and the bridge session is persistent by default) and are forwarded when the bridge reconnects. The queue holds up to `max_queued_messages` (1000 by default); messages beyond that limit are dropped.
 
 ## SiliconWit.io as the Cloud Layer
 
 <InArticleAd />
 
 
-The MQTT bridge in `mosquitto.conf` forwards every message under `greenhouse/#` to SiliconWit.io. This is not a backup. It is a live mirror that provides several production benefits:
+The MQTT bridge in `mosquitto.conf` forwards every message under `greenhouse/#` to SiliconWit.io. The copy is live, and it gives you five things:
 
-**Remote monitoring.** You can check greenhouse conditions from your phone or any browser by logging into [siliconwit.io](https://siliconwit.io). No VPN, no port forwarding, no dynamic DNS.
+- **A view from another place.** Check the greenhouse from a phone or any browser by logging into [siliconwit.io](https://siliconwit.io). No VPN, no port forwarding, no dynamic DNS.
+- **A second view.** If the local Grafana cannot be reached (power cut, network fault, server crash), SiliconWit.io still has the latest data, so you know the last state of every sensor.
+- **An alert from outside.** SiliconWit.io has its own alert system. When the local host is down, Node-RED sends nothing, and a rule on SiliconWit.io can still notice the silence and tell you.
+- **Sharing.** Give a colleague, an agronomist or a client read access on SiliconWit.io without opening your local network.
+- **A longer history.** SiliconWit.io keeps data according to your plan, so you can compare this week with last month after the local InfluxDB has deleted the older data.
 
-**Redundant visibility.** If your local Grafana instance is unreachable (power outage, network issue, server crash), SiliconWit.io still has the most recent data. You know the last state of every sensor before the outage.
-
-**Alert forwarding.** SiliconWit.io has its own alert system. You can configure cloud-side alerts as a second layer: if your local Node-RED fails to send a Slack notification (because the host is down), SiliconWit.io can still detect the anomaly and notify you.
-
-**Data sharing.** If you need to share greenhouse data with a colleague, an agronomist, or a client, you can give them read access on SiliconWit.io without exposing your local network.
-
-**Historical comparison.** SiliconWit.io retains data according to your plan. You can compare this week's greenhouse conditions with last month's, even if your local InfluxDB has already aged out older data.
-
-The bridge configuration is straightforward: `topic greenhouse/# out 1` means "forward all messages matching `greenhouse/#`, outbound only, with QoS 1." The bridge uses TLS and authenticates with your SiliconWit.io credentials. If the connection drops, Mosquitto reconnects automatically.
+In the bridge, `topic greenhouse/# out 1` means: forward all messages that match `greenhouse/#`, outward only, with QoS 1. The bridge uses TLS and your SiliconWit.io credentials, and Mosquitto reconnects it after a drop.
 
 ## Production Hardening
 
 <InArticleAd />
 
 
-A system that works in the lab is not the same as a system that runs unattended for months. These are the hardening steps for a real deployment.
+A system that works on the bench must also run for months with nobody watching. These steps prepare it.
 
 ### Log Rotation
 
@@ -1745,9 +1796,9 @@ At 100 nodes publishing every 30 seconds, the broker handles roughly 200 message
 
 **Changes needed:**
 - Increase InfluxDB `write-buffer-size` in the configuration.
-- Use Telegraf's `batch_size` and `flush_interval` to batch writes instead of writing every message individually.
-- Add a wildcard ACL pattern (`user device-%c` with `topic write greenhouse/%c/#`) so you do not need 100 individual ACL entries.
-- Automate device provisioning (Lesson 7) so you are not manually creating credentials for each node.
+- Use Telegraf's `metric_batch_size` and `flush_interval` to batch writes instead of writing every message individually.
+- Add a wildcard ACL pattern (`pattern write greenhouse/%u/#`, where `%u` is replaced by the username of the client) so you do not need 100 individual ACL entries.
+- Automate device provisioning, so that you do not create the credentials of each node by hand.
 
 ### 1,000 Nodes
 
@@ -1765,39 +1816,39 @@ At 1,000 nodes, the single Mosquitto instance may become a bottleneck. MQTT brid
 
 | Component | 3 Nodes | 100 Nodes | 1,000 Nodes |
 |-----------|---------|-----------|-------------|
-| Broker | Raspberry Pi (free) | Single VM ($10/mo) | 3-node cluster ($90/mo) |
-| InfluxDB | Same Pi | Dedicated VM ($20/mo) | InfluxDB Cloud ($100+/mo) |
-| Grafana | Same Pi | Same VM | Grafana Cloud ($50/mo) |
+| Broker | Raspberry Pi (free) | Single VM (10 USD a month) | 3-node cluster (90 USD a month) |
+| InfluxDB | Same Pi | Dedicated VM (20 USD a month) | InfluxDB Cloud (100 USD a month or more) |
+| Grafana | Same Pi | Same VM | Grafana Cloud (50 USD a month) |
 | SiliconWit.io | Free tier | Growth plan | Enterprise plan |
-| Total infra | ~$0/mo | ~$30/mo | ~$240+/mo |
+| Total infra | about 0 USD a month | about 30 USD a month | 240 USD a month or more |
 
-These are rough estimates. The point is that the architecture you built in this capstone scales without a fundamental redesign. The same MQTT topic hierarchy, the same Telegraf pipeline, the same Grafana queries all work at higher scale with configuration changes rather than a rewrite.
+These are rough estimates. The same topic plan, Telegraf pipeline and Grafana queries work at each scale, with changes of configuration and no rewrite.
 
 ## What You Have Built
 
 <InArticleAd />
 
 
-This capstone ties together every lesson in the IoT Systems course and draws on skills from the embedded programming series.
+This capstone uses every lesson of the IoT Systems course and skills from the embedded programming courses.
 
 | Skill | Where You Learned It | How You Used It Here |
 |-------|---------------------|---------------------|
-| Protocol selection (MQTT vs HTTP vs CoAP) | Lesson 1 | Chose MQTT for all sensor-to-broker communication |
-| Broker setup, TLS, ACLs, bridging | Lesson 2 | Configured Mosquitto with TLS, per-device ACLs, SiliconWit.io bridge |
-| Multi-MCU MQTT clients | Lesson 3 | Wrote firmware for ESP32, Pico W, and STM32 nodes |
-| Time-series storage and dashboards | Lesson 4 | Deployed Telegraf, InfluxDB, and Grafana with production queries |
-| REST API and device integration | Lesson 5 | Built a Flask API for data access and command dispatch |
-| Alerts and automation | Lesson 6 | Configured Node-RED with threshold and inactivity alerts via Slack |
-| Device security and provisioning | Lesson 7 | Applied TLS on all connections, per-device credentials, ACLs |
+| Protocol selection (MQTT vs HTTP vs CoAP) | This course | Chose MQTT for all sensor-to-broker communication |
+| Broker setup, TLS, ACLs, bridging | This course | Configured Mosquitto with TLS, per-device ACLs, SiliconWit.io bridge |
+| Multi-MCU MQTT clients | This course | Wrote firmware for ESP32, Pico W, and STM32 nodes |
+| Time-series storage and dashboards | This course | Deployed Telegraf, InfluxDB, and Grafana with production queries |
+| REST API and device integration | This course | Built a Flask API for data access and command dispatch |
+| Alerts and automation | This course | Configured Node-RED with threshold and inactivity alerts via Slack |
+| Device security and provisioning | This course | Applied TLS on all connections, per-device credentials, ACLs |
 | ESP32 peripherals (I2C, ADC) | ESP32 Course | Read BME280 and soil moisture sensor |
 | Pico W GPIO and ADC | RPi Pico Course | Read LDR and PIR motion sensor |
 | STM32 UART and AT commands | STM32 Course | Controlled ESP-01 for MQTT connectivity |
 | RTOS task management | RTOS Course | FreeRTOS tasks for sensor reading and MQTT publishing |
 | Containerized deployment | Embedded Linux Course | Docker Compose for the full backend stack |
 
-You now have a complete, production-grade IoT monitoring system. It handles node failures, broker restarts, and network outages. It provides local dashboards for real-time visibility and cloud forwarding for remote access. It alerts you when something goes wrong and stores historical data for analysis.
+The system reports a stopped node, recovers from a broker restart and an internet outage, shows live data locally and from another place, and keeps history. Real deployments follow the same pattern, for a greenhouse or a factory floor: nodes publish, a broker routes, a database stores, dashboards show, alerts tell a person.
 
-This is not a demo. This is the pattern that real IoT deployments follow, whether the system monitors a greenhouse, a factory floor, a building's HVAC, or a fleet of agricultural robots. The scale changes, the specific sensors change, but the architecture remains the same: nodes publish, brokers route, databases store, dashboards visualize, alerts notify, and the cloud provides reach.
+Know its limits before you depend on it. Alerts go to one channel with no second person. A command is sent and not confirmed. The nodes prove themselves with passwords, not with a certificate for each device. The exercises and the security lesson close these gaps.
 
 ## Exercises
 
@@ -1805,11 +1856,11 @@ This is not a demo. This is the pattern that real IoT deployments follow, whethe
 
 
 <Card title="Exercise 1: Add OTA Firmware Updates" icon="pencil">
-Add over-the-air firmware update capability to the ESP32 node. The node should check a firmware HTTP server on each boot (or at a configurable interval) for a newer firmware version. If a new version is available, it should download, verify the SHA-256 hash, and apply the update. Use the ESP-IDF OTA library from the [ESP32 course](/education/embedded-programming-esp32/) (Lesson 7: OTA Updates and Secure Boot). Test by deploying a firmware update that changes the publish interval from 30 seconds to 15 seconds, and verify the change takes effect after the OTA completes.
+Add over-the-air firmware update capability to the ESP32 node. The node should check a firmware HTTP server on each boot (or at a configurable interval) for a newer firmware version. If a new version is available, it should download, verify the SHA-256 hash, and apply the update. Use the ESP-IDF OTA library from [OTA updates and secure boot](/education/embedded-programming-esp32/ota-updates-secure-boot/) in the ESP32 course. Test by deploying a firmware update that changes the publish interval from 30 seconds to 15 seconds, and verify the change takes effect after the OTA completes.
 </Card>
 
 <Card title="Exercise 2: Add an Edge Gateway with Embedded Linux" icon="pencil">
-Deploy a Raspberry Pi running a custom Yocto or Buildroot image (from [Embedded Linux](/education/embedded-linux-rpi/) Lesson 9) as an edge gateway between the sensor nodes and the cloud. The edge gateway should run a local Mosquitto instance that the sensor nodes publish to over the LAN, perform local data aggregation (compute 5-minute averages), forward aggregated data to SiliconWit.io (reducing cloud bandwidth), cache raw data locally in SQLite for 7 days, and continue operating even when the internet is down. This exercise combines the [Embedded Linux course's](/education/embedded-linux-rpi/) custom image building with the IoT Systems course's broker bridging.
+Deploy a Raspberry Pi running a custom Yocto or Buildroot image (from the [Embedded Linux](/education/embedded-linux-rpi/) course) as an edge gateway between the sensor nodes and the cloud. The edge gateway should run a local Mosquitto instance that the sensor nodes publish to over the LAN, perform local data aggregation (compute 5-minute averages), forward aggregated data to SiliconWit.io (reducing cloud bandwidth), cache raw data locally in SQLite for 7 days, and continue operating even when the internet is down. This exercise combines the [Embedded Linux course's](/education/embedded-linux-rpi/) custom image building with the IoT Systems course's broker bridging.
 </Card>
 
 <Card title="Exercise 3: Multi-Channel Alert Escalation" icon="pencil">

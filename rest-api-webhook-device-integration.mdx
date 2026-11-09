@@ -25,11 +25,11 @@ import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/sta
 
 import IoTSystemsComments from '../../../../components/iot-systems/IoTSystemsComments.astro';
 
-MQTT excels at real-time streaming, but not every interaction fits the publish/subscribe model. Querying historical data, registering a new device, updating firmware configuration, or revoking an API key: these are all request/response operations where REST is the natural fit. In this lesson you will build a Flask REST API that manages devices and serves sensor data, then add a webhook receiver that processes push notifications with HMAC signature verification. By the end, your MQTT pipeline populates the database and your REST API reads from it, giving you both real-time and on-demand access to your IoT data. #REST #Webhooks #API
+A manager asks for last month's readings from one cold room. A new sensor must be added to the system. A leaked key must be cancelled today. A stream of live readings answers none of these, because each is one question that needs one answer. That is the work of a REST API: a set of web addresses that a program calls to ask for data or to change a record. In this lesson you build one with Flask, a small Python web framework. You then add a webhook receiver, an address that a platform calls when an event occurs, and check that each call is genuine. #REST #Webhooks #API
 
 ## When to Use REST vs MQTT
 
-Before writing any code, it is worth understanding when each protocol is the right choice. They are not competitors; they solve different problems and work best together.
+MQTT is the publish and subscribe protocol that carries live readings: a device sends, and every subscribed program receives. REST is request and response: one program asks, and the server answers once. A real system uses both.
 
 <CardGrid>
   <Card title="Use MQTT When" icon="star">
@@ -49,9 +49,9 @@ Before writing any code, it is worth understanding when each protocol is the rig
   </Card>
 </CardGrid>
 
+In the drawing, readings travel along the top by MQTT into a database. People and programs ask questions along the bottom by REST, and the API reads the same database.
+
 ```text
-  REST + MQTT Unified Pipeline
-  ──────────────────────────────────────────
   ESP32 ──MQTT──► Mosquitto ──► Telegraf
                    Broker         │
                                   ▼
@@ -68,48 +68,44 @@ Before writing any code, it is worth understanding when each protocol is the rig
   REST: on-demand queries and management
 ```
 
-In a typical production IoT system, both protocols coexist:
-
-| Data Flow | Protocol | Example |
-|-----------|----------|---------|
-| Sensor readings, device to broker | MQTT | ESP32 publishes temperature every 30s |
-| Broker to database | MQTT (subscriber) | Telegraf subscribes and writes to InfluxDB |
-| Dashboard queries database | REST (GET) | Grafana or custom UI fetches last 24h of data |
-| Admin registers new device | REST (POST) | Web portal sends device metadata to API |
-| Admin updates device config | REST (PUT) | Change sampling interval from 30s to 10s |
+A request that reads data: the client asks, and the server answers with a status code and the data.
 
 ```text
-  REST API Request/Response Flow
-  ──────────────────────────────────────────
   Client (browser/curl)     Flask Server
   ────────────────────      ────────────
-  GET /api/v1/devices
+  GET /api/devices
        │
        ├──────────────────────► Query DB
        │                        │
        │  200 OK                │
-       │  [{"id":"esp32-01",   ◄┘
+       │  [{"id":"esp32-001",  ◄┘
        │    "last_seen":"..."}]
        ▼
-  POST /api/v1/devices/esp32-01/config
+```
+
+A request that changes a record carries the new values in its body:
+
+```text
+  Client (browser/curl)     Flask Server
+  ────────────────────      ────────────
+  PUT /api/devices/esp32-001/config
        {"interval": 10}
        │
        ├──────────────────────► Validate
-       │                        Publish MQTT cmd
+       │                        Update database
        │  200 OK               ◄┘
        │  {"status":"updated"}
        ▼
 ```
-| Platform notifies external service | Webhook (POST) | Alert fires, platform POSTs to your endpoint |
-
-The lesson builds each piece of this architecture.
 
 ## REST Fundamentals for IoT
 
 <InArticleAd />
 
 
-REST (Representational State Transfer) maps CRUD operations to HTTP methods. For IoT, the "resources" are devices, sensor readings, configurations, and commands.
+In REST (Representational State Transfer), each thing the system keeps (a device, a reading, a configuration) has its own address, and the HTTP method says what to do with it.
+
+The last column says whether a method is idempotent: sent twice, it leaves the same result as sent once. This matters on a poor network, where a device that gets no reply sends the request again.
 
 ### HTTP Methods
 
@@ -118,12 +114,12 @@ REST (Representational State Transfer) maps CRUD operations to HTTP methods. For
 | GET | Read | Fetch latest sensor reading | Yes |
 | POST | Create | Register a new device, send a command | No |
 | PUT | Update/Replace | Update device configuration | Yes |
-| PATCH | Partial update | Change only the sampling interval | Yes |
+| PATCH | Partial update | Change only the sampling interval | Not guaranteed |
 | DELETE | Remove | Decommission a device | Yes |
 
 ### Status Codes That Matter
 
-You do not need to memorize every HTTP status code, but these appear constantly in IoT APIs:
+Every reply starts with a status code. A code that begins with 2 means success, with 4 a mistake by the caller, and with 5 a failure of the server:
 
 | Code | Meaning | When You See It |
 |------|---------|-----------------|
@@ -140,7 +136,7 @@ You do not need to memorize every HTTP status code, but these appear constantly 
 
 ### JSON Payload Conventions
 
-IoT APIs typically return JSON. A consistent response envelope makes client code simpler:
+Give every JSON reply the same outer shape, so that client code can check one field, `status`, first:
 
 ```json title="Successful response"
 {
@@ -169,7 +165,7 @@ IoT APIs typically return JSON. A consistent response envelope makes client code
 <InArticleAd />
 
 
-Flask is lightweight and widely used for IoT backends. The API server manages device registration, serves sensor data, accepts commands, and updates configuration. In production you would use a proper database; here we use SQLite to keep the focus on the API design.
+The API server registers devices, serves sensor data, accepts commands and updates configuration. It stores everything in SQLite, a database that lives in one file, so that the attention stays on the design of the API. A production system would use a database server.
 
 ### Project Structure
 
@@ -196,6 +192,8 @@ pip install -r requirements.txt
 ```
 
 ### Database Models
+
+This file creates three tables (devices, readings, commands) and gives one small function for each thing the API must do. Every query passes its values through `?` marks and never builds SQL text from user input, which stops a caller from injecting SQL. Notice that the `status` of a command starts as `pending`.
 
 ```python title="models.py"
 import sqlite3
@@ -316,14 +314,16 @@ def update_device_config(device_id, config):
 def delete_device(device_id):
     """Remove a device and all its data. Returns True if found."""
     conn = get_db()
-    cursor = conn.execute(
-        "DELETE FROM devices WHERE device_id = ?", (device_id,)
-    )
+    # Delete the rows that refer to the device first. With foreign keys
+    # switched on, SQLite refuses to delete a device that still has them.
     conn.execute(
         "DELETE FROM readings WHERE device_id = ?", (device_id,)
     )
     conn.execute(
         "DELETE FROM commands WHERE device_id = ?", (device_id,)
+    )
+    cursor = conn.execute(
+        "DELETE FROM devices WHERE device_id = ?", (device_id,)
     )
     conn.commit()
     deleted = cursor.rowcount > 0
@@ -394,6 +394,8 @@ def insert_command(device_id, command, params=None):
 ```
 
 ### API Key Authentication
+
+An API key is a long random text that the caller sends with every request. `require_auth` runs before an endpoint: no key or an unknown key gets 401, and a real key without the needed permission gets 403. The key made at the end is for development only.
 
 ```python title="auth.py"
 import os
@@ -468,6 +470,8 @@ DEFAULT_KEY = generate_api_key("admin", ["read", "write", "admin"])
 ```
 
 ### The Flask Application
+
+Each function below is one endpoint. The `@app.route` line gives its address and method, and the `@require_auth` line gives the permission it needs. Read `send_command` with care: it only stores the command and answers `pending`.
 
 ```python title="app.py"
 from flask import Flask, request, jsonify
@@ -817,6 +821,12 @@ Start the server and test each endpoint:
    ```
 </Steps>
 
+:::caution[A command that was sent is not a command that was done]
+In step 7 the server answered `pending`. That means the command is stored. It does not mean that the device restarted, and in this lesson nothing delivers the command yet. A complete system sends the command, waits for the device to answer that it acted, and only then marks it done. With no answer in time, it marks the command failed and tells a person. On SiliconWit.io a command goes to the topic `d/<id>/c` and the device answers within 30 seconds on `d/<id>/k/<session>`.
+
+A command over a network can be late or lost, so it must never be the only thing that stops a machine. Fast decisions and safety limits stay in the device.
+:::
+
 ## SiliconWit.io REST API
 
 <InArticleAd />
@@ -867,7 +877,7 @@ You can use either SiliconWit.io or your own Flask API for the rest of this less
 <InArticleAd />
 
 
-Polling an API every few seconds to check if something changed is wasteful. Webhooks flip the model: the server calls your endpoint when an event occurs. You register a URL, and the platform POSTs to it whenever a condition triggers.
+To learn that a device went offline, your program could ask the API every few seconds, and almost every answer would be "nothing changed". A webhook turns this round: you give the platform an address, and the platform sends a POST request to it when the event occurs. It is the difference between telephoning a shop every five minutes to ask whether your parcel has arrived, and leaving your number so that the shop calls you once.
 
 ### How Webhooks Work
 
@@ -876,16 +886,18 @@ Polling an API every few seconds to check if something changed is wasteful. Webh
 
 2. **Event occurs.** The device misses three consecutive heartbeats. The platform detects it is offline.
 
-3. **Platform sends POST.** The platform constructs a JSON payload describing the event, signs it with a shared secret, and POSTs it to your registered URL.
+3. **Platform sends POST.** The platform describes the event in JSON, signs it with a shared secret, and POSTs it to your URL.
 
-4. **Your server processes the event.** Your endpoint validates the signature, extracts the event data, takes action (send a Slack message, page an engineer, log to a database), and returns HTTP 200.
+4. **Your server processes the event.** Your endpoint checks the signature, acts (a Slack message, a database record), and returns HTTP 200.
 
-5. **Platform confirms delivery.** If your endpoint does not return 2xx within a timeout (typically 5 to 10 seconds), the platform retries with exponential backoff.
+5. **Platform confirms delivery.** If your endpoint does not return 2xx within a timeout (typically 5 to 10 seconds), the platform sends the event again, and waits longer before each new attempt. So your server can receive the same event twice. Use the `alert_id` in the event to ignore one it has already handled.
 </Steps>
 
 ### Security: Why Signatures Matter
 
-Anyone who knows your webhook URL could send fake events. HMAC-SHA256 signatures prevent this. The platform and your server share a secret key. The platform computes `HMAC-SHA256(secret, request_body)` and includes it in a header. Your server recomputes the HMAC and compares. If they match, the request is authentic.
+Anyone who knows your webhook URL could send fake events. A signature stops this. The platform and your server share a secret key. The platform passes the secret and the request body through HMAC-SHA256, a function that mixes the two into a short code, and sends the code in a header. Your server computes the same code and compares. Only someone who holds the secret can produce a code that matches.
+
+The signature does not hide the event, so use HTTPS. It does not stop someone who recorded a genuine request from sending it again later, so check the time in the event and its `alert_id`.
 
 ```
 POST /webhooks/iot HTTP/1.1
@@ -901,7 +913,7 @@ X-Webhook-Signature: sha256=a1b2c3d4e5f6...
 <InArticleAd />
 
 
-This Flask application receives webhook events, validates the HMAC signature, processes the event, and returns an acknowledgment.
+This Flask application receives webhook events, checks the signature, handles the event and confirms receipt. Notice that the signature is computed over the raw bytes of the body, before any JSON parsing: parsing and writing the JSON again can change one space, and then the codes no longer match.
 
 ```python title="webhook_receiver.py"
 import hmac
@@ -1137,7 +1149,7 @@ When you configure webhooks on SiliconWit.io, the platform sends structured JSON
   "message": "Device missed 3 consecutive heartbeats.",
   "severity": "warning",
   "metadata": {
-    "last_seen": "2026-03-10T14:25:00Z",
+    "last_seen": "2026-03-10T14:28:30Z",
     "expected_interval_s": 30
   }
 }
@@ -1168,21 +1180,11 @@ The `X-Webhook-Signature` header uses the same `sha256=<hex>` format shown in th
 <InArticleAd />
 
 
-In Lessons 2 through 4, you set up an MQTT broker, wrote firmware clients, and stored data in InfluxDB via Telegraf. The REST API from this lesson reads from a database. How do these fit together?
+The two paths meet in the database, as the first drawing of this lesson shows.
 
 ### The Data Flow
 
-```
-ESP32 --[MQTT]--> Broker --[Telegraf]--> InfluxDB
-                                              |
-                                              v
-                                         REST API --[HTTP]--> Dashboard / Mobile App
-                                              |
-                                              v
-                                         Webhook --> External Services
-```
-
-MQTT handles the real-time ingestion path. Telegraf subscribes to the broker topics and writes every message to InfluxDB (or SQLite, or PostgreSQL). The REST API does not touch MQTT at all; it queries the database directly. This separation means:
+Telegraf subscribes to the broker topics and writes every message to InfluxDB (or SQLite, or PostgreSQL). The REST API does not touch MQTT at all. It queries the database. This separation means:
 
 - MQTT can be down temporarily without affecting historical queries.
 - The REST API can serve thousands of dashboard users without adding load to the broker.
@@ -1190,7 +1192,7 @@ MQTT handles the real-time ingestion path. Telegraf subscribes to the broker top
 
 ### Connecting the Flask API to InfluxDB
 
-If you followed Lesson 4 and have InfluxDB running with Telegraf, you can swap the SQLite backend for InfluxDB queries. Here is how the data endpoint changes:
+If you already have InfluxDB running with Telegraf, you can replace the SQLite queries with InfluxDB queries. Only the function that reads the data changes:
 
 <Tabs>
 <TabItem label="SQLite (this lesson)">
@@ -1213,8 +1215,8 @@ from influxdb_client import InfluxDBClient
 
 INFLUX_URL = "http://localhost:8086"
 INFLUX_TOKEN = "your-influxdb-token"
-INFLUX_ORG = "iot"
-INFLUX_BUCKET = "sensor_data"
+INFLUX_ORG = "siliconwit"
+INFLUX_BUCKET = "iot_sensors"
 
 client = InfluxDBClient(
     url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG
@@ -1226,7 +1228,7 @@ def get_readings_range_influx(device_id, start, end, limit=1000):
     query = f'''
         from(bucket: "{INFLUX_BUCKET}")
           |> range(start: {start}, stop: {end})
-          |> filter(fn: (r) => r["device_id"] == "{device_id}")
+          |> filter(fn: (r) => r["device"] == "{device_id}")
           |> limit(n: {limit})
           |> pivot(
                rowKey: ["_time"],
@@ -1249,16 +1251,18 @@ def get_readings_range_influx(device_id, start, end, limit=1000):
 </TabItem>
 </Tabs>
 
-Both backends serve the same REST endpoints. The client code (dashboard, mobile app, CLI tool) does not care where the data is stored. This is the value of putting a REST API in front of your data.
+Both databases serve the same REST endpoints, so the dashboard or mobile app that calls them does not change when the storage changes.
 
 ## ESP32 as HTTP Client: Fallback Data Ingestion
 
 <InArticleAd />
 
 
-MQTT is the primary data path, but sometimes the broker is unreachable. A robust device should fall back to HTTP POST. This ESP-IDF code sends sensor data to your REST API (or to SiliconWit.io's ingest endpoint) when MQTT fails.
+MQTT is the main data path, but sometimes the broker cannot be reached while the network still works. A device can then send the reading by HTTP POST. This ESP-IDF code sends sensor data to your REST API (or to SiliconWit.io's ingest endpoint) when MQTT fails. It treats only the status 201 as success.
 
 ```c title="http_fallback.c"
+#include <stdlib.h>
+#include <string.h>
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "cJSON.h"
@@ -1351,14 +1355,14 @@ void sensor_publish_task(void *pvParameters)
 }
 ```
 
-This dual-path approach ensures data reaches the backend even during broker outages. The REST API ingest endpoint stores the data in the same database, so no readings are lost.
+With two paths, a reading still reaches the database when the broker is down. When the network itself is down, both paths fail and this code drops the reading. A device that must not lose readings stores them and sends them when the connection returns.
 
 ## Rate Limiting and Pagination
 
 <InArticleAd />
 
 
-Production APIs need to protect against abuse and handle large result sets efficiently.
+One faulty script that calls the API without pause can stop the service for everyone, and one request for a year of readings can fill the server's memory. Rate limiting answers the first problem and pagination the second.
 
 ### Rate Limiting
 
@@ -1378,7 +1382,7 @@ def send_command(device_id):
     ...
 ```
 
-When a client exceeds the limit, the server returns `429 Too Many Requests` with a `Retry-After` header:
+When a client exceeds the limit, the server returns `429 Too Many Requests`. With `headers_enabled=True` in the `Limiter` settings it also sends a `Retry-After` header. An `@app.errorhandler(429)` function can return the body in the same JSON envelope as the other errors:
 
 ```json
 {
@@ -1392,7 +1396,7 @@ When a client exceeds the limit, the server returns `429 Too Many Requests` with
 
 ### Pagination
 
-For endpoints that return lists (devices, readings), add `offset` and `limit` parameters:
+Pagination returns a long list in pages. The caller says where to start (`offset`) and how many items it wants (`limit`). The server never returns more than its own maximum, and says in `has_more` whether another page exists:
 
 ```python title="Paginated device listing"
 @app.route("/api/devices", methods=["GET"])
@@ -1439,11 +1443,11 @@ curl "http://localhost:5000/api/devices?offset=20&limit=20" -H "..."
 <InArticleAd />
 
 
-The `auth.py` module demonstrates two common authentication methods. Here is a summary of the options you will encounter in IoT APIs.
+The `auth.py` module accepts a key in two places. These are the options you will meet in IoT APIs.
 
 ### API Keys
 
-The simplest approach. The client includes a static key in every request.
+The simplest method. The client sends the same key with every request.
 
 <Tabs>
 <TabItem label="Header (Bearer)">
@@ -1479,7 +1483,7 @@ Avoid this in production. The key appears in server logs, browser history, and p
 
 ### Bearer Tokens (JWT)
 
-For more complex systems, JSON Web Tokens (JWT) carry claims (user ID, permissions, expiration) inside the token itself. The server verifies the signature without a database lookup. This is common in platforms like SiliconWit.io where a user logs in, receives a JWT, and uses it for subsequent API calls.
+A JSON Web Token (JWT) carries its own facts (user ID, permissions, expiry time) inside the token, signed by the server. The server checks the signature and needs no database lookup. Platforms with user accounts often work this way: a user logs in, receives a JWT, and sends it with later API calls.
 
 ```python title="JWT verification (conceptual)"
 import jwt
@@ -1496,49 +1500,42 @@ def verify_jwt(token):
         return None
 ```
 
-For this course, API keys are sufficient. JWT adds complexity that is only justified when you have user accounts with different roles.
+For this course, API keys are enough.
 
 ## Putting It All Together
 
 <InArticleAd />
 
 
-Here is the complete architecture from this lesson in context with the previous lessons:
-
 <Card title="Full IoT Data Pipeline" icon="star">
-**Lesson 2:** Mosquitto broker with TLS and ACLs.
-**Lesson 3:** ESP32, Pico W, and STM32 publish sensor data via MQTT.
-**Lesson 4:** Telegraf subscribes to MQTT topics and writes to InfluxDB. Grafana dashboards visualize the data.
-**Lesson 5 (this lesson):** REST API serves data on demand. Webhooks push alerts to external services. ESP32 falls back to HTTP when MQTT is unavailable.
+**Broker:** Mosquitto with TLS and access rules.
+**Devices:** ESP32, Pico W and STM32 publish sensor data by MQTT.
+**Storage and charts:** Telegraf writes the MQTT messages to InfluxDB, and Grafana draws them.
+**This lesson:** a REST API serves data on request, webhooks carry alerts to other services, and the ESP32 sends by HTTP when the broker cannot be reached.
 </Card>
-
-The separation of concerns is clear:
-
-- **MQTT** handles the high-frequency, low-latency ingestion path.
-- **REST** handles the request/response, query, and management path.
-- **Webhooks** handle the event-driven notification path.
-
-Each protocol does what it is best at. No single protocol handles everything well, and trying to force one into the wrong role leads to fragile, inefficient systems.
 
 ## Exercises
 
 <InArticleAd />
 
 
-1. **Add device registration via the REST API and verify with curl.** Start the Flask server, register three devices with different types (sensor, actuator, gateway), ingest at least five readings per device, then query the historical data for one device using the `start` and `end` parameters. Export the results as a CSV file using a Python script that calls the API and writes the output.
+1. **Register devices and read their history.** Start the Flask server, register three devices of different types (sensor, actuator, gateway), and send at least five readings for each. Query the history of one device with the `start` and `end` parameters. Write a Python script that calls the API and saves the result as a CSV file.
 
-2. **Implement a webhook relay that forwards events to Discord.** Extend the webhook receiver so that when it receives a `threshold_exceeded` event with severity `critical`, it sends a message to a Discord channel using a Discord webhook URL. Test the full chain: send a test event to your receiver, verify the message appears in Discord. Add a `severity_filter` configuration so that only events above a certain severity (info, warning, critical) are forwarded.
+2. **Forward webhook events to Discord.** Extend the webhook receiver so that a `threshold_exceeded` event with severity `critical` sends a message to a Discord channel through a Discord webhook URL. Send a test event and verify that the message appears. Add a `severity_filter` setting so that only events at or above a chosen severity are forwarded.
 
-3. **Build a combined MQTT subscriber and REST API server.** Write a single Python application that subscribes to MQTT topics (using `paho-mqtt`) and also runs a Flask REST API. MQTT messages are stored in SQLite as they arrive. The REST API serves the stored data. Note that paho-mqtt runs callbacks in a background thread, so you must create a new `sqlite3.connect()` inside each callback rather than sharing a connection from the main thread (SQLite raises a threading error otherwise). Test by publishing MQTT messages from your ESP32, then querying the REST API from a browser or curl. This eliminates the need for Telegraf and InfluxDB for simple setups.
+3. **Combine an MQTT subscriber and a REST API.** Write one Python application that subscribes to MQTT topics with `paho-mqtt`, stores each message in SQLite, and serves the stored data through Flask. paho-mqtt runs its callbacks in a background thread, so open a new `sqlite3.connect()` inside each callback (SQLite raises a threading error if you share one connection). Publish from your ESP32, then query the API with curl.
 
-4. **Implement API key rotation.** Extend the `auth.py` module to support key rotation. Add endpoints to generate a new key (`POST /api/keys`), list active keys (`GET /api/keys`), and revoke a key (`DELETE /api/keys/{key_id}`). Each key should have a creation timestamp and an optional expiration date. Test by generating a new key, using it successfully, revoking it, and confirming that subsequent requests with the revoked key return 401.
+4. **Replace a key without downtime.** Extend `auth.py` with endpoints to make a key (`POST /api/keys`), list active keys (`GET /api/keys`) and cancel a key (`DELETE /api/keys/{key_id}`). Give each key a creation time and an optional expiry date. Make a key, use it, cancel it, and confirm that the next request with it returns 401.
 
 ## Summary
 
 <InArticleAd />
 
 
-You built a complete REST API for IoT device management with endpoints for registration, data ingestion, historical queries, commands, and configuration updates. The API uses proper HTTP methods (GET, POST, PUT, DELETE), returns consistent JSON responses, authenticates requests with API keys, and enforces rate limits. You then built a webhook receiver that validates HMAC-SHA256 signatures to ensure only authentic events are processed. The ESP32 HTTP client provides a fallback data path when MQTT is unavailable. Together with the MQTT pipeline from previous lessons, you now have a three-protocol architecture: MQTT for real-time streaming, REST for on-demand queries and management, and webhooks for push notifications.
+- The REST API registers devices and serves readings, history, commands and configuration. It answers in one JSON shape, checks an API key and limits the request rate.
+- A stored command is not an executed command. Only a confirmed reply from the device shows that it acted.
+- The webhook receiver accepts only a sender who holds the secret. Events can arrive twice, so it must ignore repeats.
+- The ESP32 sends by HTTP when the broker cannot be reached. With the network down it loses readings unless it stores them.
 
 <IoTSystemsComments />
 
