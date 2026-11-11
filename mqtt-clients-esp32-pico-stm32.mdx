@@ -81,7 +81,7 @@ Three microcontroller nodes. Each reads a BME280 temperature and humidity sensor
 <InArticleAd />
 
 
-A flat topic like `sensor/data` works for one device. With ten devices you cannot tell them apart, and with a hundred you cannot give each one its own permissions. A topic with levels lets you select and protect any part of the system.
+A flat topic like `sensor/data` works for one device. With ten you cannot tell them apart, and with a hundred you cannot give each its own permissions. Levels let you select and protect any part of the system.
 
 ### The Hierarchy Pattern
 
@@ -168,7 +168,7 @@ The device receives a command on its `commands` subtopic. A command is a request
 
 ### Why JSON and Not Binary?
 
-JSON repeats the field names in every message. At one message every 10 seconds those extra bytes are small beside the TCP and TLS overhead, and in return a person can read the message and every tool accepts it. For hundreds of messages per second, look at a binary format such as CBOR.
+JSON repeats the field names in every message. At one message every 10 seconds those bytes are small beside the TCP and TLS overhead, and a person can read the message and every tool accepts it. For hundreds of messages per second, look at a binary format such as CBOR.
 
 ## QoS Selection Strategy
 
@@ -217,7 +217,7 @@ The ESP32 has Wi-Fi built in. Its ESP-IDF `mqtt_client` component supports TLS, 
 
 ### Wi-Fi Connection
 
-This file joins the Wi-Fi network and tries again up to 10 times if the connection drops.
+This file joins the Wi-Fi network and tries again up to 10 times if the connection drops. After the tenth quick failure it stops for good: a router off for a few minutes leaves the node offline until it restarts. On a site, use the growing waits of [the ESP32 Wi-Fi lesson](/education/embedded-programming-esp32/wifi-network-configuration/).
 
 ```c title="wifi_connect.c"
 #include <string.h>
@@ -298,7 +298,7 @@ void wifi_init_sta(void)
 
 Read this file in three parts:
 
-- `mqtt_event_handler` reacts to events. On connect it publishes a retained "online" status and subscribes to commands. On disconnect it waits with a growing delay.
+- `mqtt_event_handler` reacts to events. On connect it publishes a retained "online" status and subscribes to commands. On disconnect it only notes when to try again, after a growing delay: it runs inside the MQTT client's own task, and a wait there would stop the client. `mqtt_reconnect_if_due()` (declare it in `mqtt_handler.h`) starts the attempt from the sensor task.
 - `mqtt_app_start` sets the broker address, the CA certificate, the last will (LWT, the "offline" message the broker publishes if the device disappears) and a keepalive of 30 seconds.
 - The publish functions use QoS 0 for telemetry and QoS 1 for alerts.
 
@@ -311,14 +311,17 @@ Read this file in three parts:
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_timer.h"
 #include "mqtt_client.h"
 #include "mqtt_handler.h"
 
 static const char *TAG = "mqtt";
 static esp_mqtt_client_handle_t client = NULL;
 static bool mqtt_connected = false;
+extern int publish_interval_s;          /* defined in main.c */
 
 /* Reconnection state */
+static int64_t next_attempt_us = 0;     /* 0: no attempt waiting */
 static int backoff_ms = 1000;
 static const int BACKOFF_MAX_MS = 60000;
 static const float BACKOFF_MULTIPLIER = 2.0;
@@ -367,7 +370,10 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
         ESP_LOGI(TAG, "Reconnecting in %d ms (backoff: %d, jitter: %d)",
                  delay, backoff_ms, jitter);
 
-        vTaskDelay(pdMS_TO_TICKS(delay));
+        /* Do not wait here: this handler runs in the MQTT task, and a
+         * wait would stop that task. Note the time instead; the sensor
+         * task calls mqtt_reconnect_if_due(), which starts the attempt. */
+        next_attempt_us = esp_timer_get_time() + (int64_t)delay * 1000;
 
         /* Increase backoff for next attempt */
         backoff_ms = (int)(backoff_ms * BACKOFF_MULTIPLIER);
@@ -392,13 +398,18 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
 
         /* Parse command JSON (simplified; production code should use cJSON) */
         if (strstr(cmd, "set_interval")) {
-            int new_interval = 10;
+            int new_interval = 0;
             const char *value = strstr(cmd, "\"value\"");
             if (value && (value = strchr(value, ':')) != NULL) {
                 new_interval = atoi(value + 1);
             }
-            ESP_LOGI(TAG, "Setting publish interval to %d seconds", new_interval);
-            /* Update the publish interval variable here */
+            /* A command is a request: keep the device's own limits */
+            if (new_interval >= 5 && new_interval <= 3600) {
+                publish_interval_s = new_interval;
+                ESP_LOGI(TAG, "Publish interval set to %d seconds", new_interval);
+            } else {
+                ESP_LOGW(TAG, "Refused interval %d (allowed 5 to 3600 s)", new_interval);
+            }
         }
         break;
     }
@@ -440,11 +451,25 @@ void mqtt_app_start(void)
             },
             .keepalive = 30,
         },
+        .network = {
+            /* The growing waits below replace the fixed 10 s retry */
+            .disable_auto_reconnect = true,
+        },
     };
 
     client = esp_mqtt_client_init(&mqtt_cfg);
     esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
     esp_mqtt_client_start(client);
+}
+
+/* Called from the sensor task, never from the event handler */
+void mqtt_reconnect_if_due(void)
+{
+    if (!mqtt_connected && next_attempt_us != 0 &&
+        esp_timer_get_time() >= next_attempt_us) {
+        next_attempt_us = 0;
+        esp_mqtt_client_reconnect(client);
+    }
 }
 
 bool mqtt_is_connected(void)
@@ -463,10 +488,17 @@ void mqtt_publish_telemetry(float temperature, float humidity)
     time_t now;
     time(&now);
 
+    /* Until SNTP has set the clock, time() counts from 1970 at power-on:
+     * send null ("not known"), not a false date */
+    char ts[16] = "null";
+    if (now > 1700000000) {
+        snprintf(ts, sizeof(ts), "%ld", (long)now);
+    }
+
     char payload[256];
     snprintf(payload, sizeof(payload),
-        "{\"device_id\":\"%s\",\"ts\":%ld,\"temperature\":%.1f,\"humidity\":%.1f}",
-        DEVICE_ID, (long)now, temperature, humidity);
+        "{\"device_id\":\"%s\",\"ts\":%s,\"temperature\":%.1f,\"humidity\":%.1f}",
+        DEVICE_ID, ts, temperature, humidity);
 
     /* QoS 0 for regular telemetry */
     esp_mqtt_client_publish(client, TOPIC_TELEMETRY, payload, 0, 0, 0);
@@ -540,12 +572,13 @@ esp_mqtt_client_publish(client, SILICONWIT_TOPIC, payload, 0, 0, 0);
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "esp_netif_sntp.h"
 #include "wifi_connect.h"
 #include "mqtt_handler.h"
 #include "bme280.h"
 
 static const char *TAG = "main";
-static int publish_interval_s = 10;
+int publish_interval_s = 10;   /* not static: a command can change it */
 
 #define TEMP_ALERT_THRESHOLD 40.0
 
@@ -566,7 +599,11 @@ void sensor_task(void *pvParameters)
             mqtt_publish_alert("temperature_high", temperature, TEMP_ALERT_THRESHOLD);
         }
 
-        vTaskDelay(pdMS_TO_TICKS(publish_interval_s * 1000));
+        /* Wait in 1 s steps, so a reconnection waits no longer than planned */
+        for (int s = 0; s < publish_interval_s; s++) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            mqtt_reconnect_if_due();
+        }
     }
 }
 
@@ -575,6 +612,14 @@ void app_main(void)
     ESP_ERROR_CHECK(nvs_flash_init());
 
     wifi_init_sta();
+
+    /* Set the clock from the internet (ESP-IDF 5.1 or later) */
+    esp_sntp_config_t sntp_cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    esp_netif_sntp_init(&sntp_cfg);
+    if (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(10000)) != ESP_OK) {
+        ESP_LOGW(TAG, "Clock not set yet: ts is sent as null until it is");
+    }
+
     mqtt_app_start();
 
     xTaskCreate(sensor_task, "sensor_task", 4096, NULL, 5, NULL);
@@ -733,8 +778,13 @@ class SensorMQTTClient:
         try:
             data = json.loads(msg_str)
             if data.get("command") == "set_interval":
-                self.publish_interval = data.get("value", config.PUBLISH_INTERVAL_S)
-                print(f"Publish interval set to {self.publish_interval}s")
+                value = data.get("value")
+                # A command is a request: accept a whole number in range only
+                if isinstance(value, int) and 5 <= value <= 3600:
+                    self.publish_interval = value
+                    print(f"Publish interval set to {self.publish_interval}s")
+                else:
+                    print("Refused interval:", value)
             elif data.get("command") == "reboot":
                 print("Reboot command received, resetting...")
                 time.sleep(1)
@@ -747,6 +797,14 @@ class SensorMQTTClient:
         if self.connected:
             try:
                 self.client.check_msg()
+            except OSError:
+                self.connected = False
+
+    def ping(self):
+        """umqtt.simple sends no keepalive pings by itself."""
+        if self.connected:
+            try:
+                self.client.ping()
             except OSError:
                 self.connected = False
 
@@ -838,6 +896,14 @@ def connect_wifi():
 def main():
     wlan = connect_wifi()
 
+    # Set the clock (UTC). Without it the Pico's clock starts at
+    # 2021-01-01 and every "ts" is a believable but false date.
+    import ntptime
+    try:
+        ntptime.settime()
+    except OSError:
+        print("NTP failed: ts values are wrong until the clock is set")
+
     # Initialize I2C and BME280
     i2c = I2C(0, sda=Pin(0), scl=Pin(1), freq=400000)
     sensor = BME280(i2c=i2c)
@@ -873,7 +939,13 @@ def main():
             buffer.store(temperature, humidity)
             mqtt.reconnect()
 
-        time.sleep(mqtt.publish_interval)
+        # Wait in 1 s steps: commands are read at once, and a ping every
+        # 15 s keeps the 30 s keepalive even when the interval is longer
+        for s in range(mqtt.publish_interval):
+            time.sleep(1)
+            mqtt.check_messages()
+            if s % 15 == 14:
+                mqtt.ping()
 
 if __name__ == "__main__":
     main()
@@ -915,6 +987,8 @@ def connect_siliconwit(self):
     self.client.publish(config.SILICONWIT_TOPIC, payload, qos=0)
 ```
 
+With `ssl=True` the connection is encrypted, but MicroPython's `ssl.wrap_socket` checks no certificate by default (`cert_reqs=CERT_NONE`), so an imitation broker is accepted too. To check it, pass `ssl=` an `ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)` with the CA certificate loaded by `load_verify_locations()`; the current `umqtt.simple` accepts a context.
+
 ## STM32 MQTT Client (via ESP-01 AT Commands)
 
 <InArticleAd />
@@ -922,7 +996,7 @@ def connect_siliconwit(self):
 
 The STM32F4 has no Wi-Fi, so an ESP-01 module is connected to it over a UART serial line. The ESP-01 does the Wi-Fi and TCP work. The STM32 controls it with AT commands, short text commands that begin with the letters AT, and then builds each MQTT packet itself, byte by byte.
 
-This division is common in industry: the main microcontroller does the real-time control, and a second module does the communication. If the network fails, the control continues.
+This division is common in industry: the main microcontroller does the real-time control, and a second module does the communication. If the network fails, the control continues, but only if it runs apart from the network code: the listing below is one loop that waits up to 15 s for Wi-Fi and up to 75 s between attempts, so real control belongs in a timer interrupt or its own RTOS task.
 
 ### Hardware Connections
 
@@ -1324,7 +1398,7 @@ uint16_t mqtt_build_disconnect(uint8_t *buf)
 
 ### STM32 Main Application
 
-`mqtt_connect_sequence` runs the steps in order: Wi-Fi, TCP, the MQTT CONNECT packet with the last will, then the subscription to commands. The main loop publishes every 10 seconds and sends a ping at half the keepalive time, so the broker does not declare the device lost.
+`mqtt_connect_sequence` runs the steps in order: Wi-Fi, TCP, the MQTT CONNECT packet with the last will, then the subscription to commands. The main loop publishes every 10 seconds and sends a ping at half the keepalive time, so the broker does not declare the device lost. If nothing comes back for 1.5 keepalives (45 s), not even a ping's answer, it reconnects: in transparent mode the ESP-01 does not report a closed connection.
 
 ```c title="stm32_mqtt_main.c"
 #include "main.h"
@@ -1352,6 +1426,7 @@ uint16_t mqtt_build_disconnect(uint8_t *buf)
 
 static uint8_t mqtt_buf[512];
 static bool mqtt_connected = false;
+static uint32_t last_rx = 0;      /* tick of the last byte from the broker */
 static uint32_t backoff_ms = 1000;
 static const uint32_t BACKOFF_MAX_MS = 60000;
 
@@ -1395,6 +1470,7 @@ void mqtt_connect_sequence(void)
         printf("MQTT CONNACK received, connection accepted\r\n");
         mqtt_connected = true;
         backoff_ms = 1000;
+        last_rx = HAL_GetTick();
 
         /* Subscribe to commands */
         len = mqtt_build_subscribe(mqtt_buf, TOPIC_COMMANDS, 1, 1);
@@ -1412,10 +1488,12 @@ void mqtt_publish_telemetry(float temperature, float humidity)
     if (!mqtt_connected) return;
 
     char payload[256];
-    uint32_t ts = HAL_GetTick() / 1000;  /* Approximate; use RTC for real epoch */
+    /* No clock is set here, so "ts" is null and the server stamps the time.
+     * HAL_GetTick() / 1000 is time since power-on, not a date: sending it
+     * as "ts" would put every reading in January 1970. */
     snprintf(payload, sizeof(payload),
-        "{\"device_id\":\"%s\",\"ts\":%lu,\"temperature\":%.1f,\"humidity\":%.1f}",
-        DEVICE_ID, ts, temperature, humidity);
+        "{\"device_id\":\"%s\",\"ts\":null,\"temperature\":%.1f,\"humidity\":%.1f}",
+        DEVICE_ID, temperature, humidity);
 
     uint16_t len = mqtt_build_publish(mqtt_buf, TOPIC_TELEMETRY, payload, 0, 0);
     esp01_send_raw(mqtt_buf, len);
@@ -1485,10 +1563,20 @@ int main(void)
             uint8_t rx[256];
             uint16_t rx_len = esp01_recv_raw(rx, sizeof(rx), 100);
             if (rx_len > 0) {
+                last_rx = HAL_GetTick();
                 /* Parse MQTT PUBLISH packet from broker */
                 printf("Received %u bytes from broker\r\n", rx_len);
                 /* In production, parse the MQTT packet header and extract payload */
             }
+        }
+
+        /* The broker answers every ping (PINGRESP). Nothing at all for
+         * 1.5 keepalives means the link is gone, although the ESP-01
+         * reported nothing: reconnect instead of publishing into nothing. */
+        if (mqtt_connected &&
+            (HAL_GetTick() - last_rx > KEEPALIVE_S * 1500UL)) {
+            printf("Broker silent for %d s, reconnecting\r\n", KEEPALIVE_S * 3 / 2);
+            mqtt_connected = false;
         }
 
         /* Reconnect if disconnected */
@@ -1568,20 +1656,20 @@ The ESP-01 suits a low-cost design where the STM32 was chosen for its real-time 
 <InArticleAd />
 
 
-Network connections fail. Wi-Fi access points restart, brokers stop for updates, and mobile modems lose signal. A client that retries once and stops is lost. A client that retries every second, together with hundreds of others, can overload the broker at the moment it comes back.
+Wi-Fi access points restart, brokers stop for updates, and modems lose signal. A client that retries once and stops is lost; hundreds that retry every second can overload the broker the moment it returns.
 
 ### Exponential Backoff with Jitter
 
 The answer is to wait longer after each failure, as you do with a busy telephone number: you try again soon, then after a longer pause. All three clients do this:
 
 <Steps>
-1. **Start with a small delay.** The first attempt waits 1 second. A short interruption is repaired quickly.
+1. **Start with a small delay.** The first attempt waits 1 second, so a short interruption is repaired quickly.
 
-2. **Double the delay on each failure.** Then wait 2, 4, 8, 16, 32 seconds. This is the "exponential backoff". A broker that is down for maintenance gets few attempts.
+2. **Double the delay on each failure:** 2, 4, 8, 16, 32 seconds. This "exponential backoff" gives a broker under maintenance few attempts.
 
-3. **Limit the delay.** The delay stops growing at 60 seconds. Without a limit it would grow to hours.
+3. **Limit the delay** to 60 seconds, or it would grow to hours.
 
-4. **Add a random part, called jitter.** Each delay gets a random extra of 0 to 25% of its value. Without jitter, all devices that lost the broker at the same instant would also return at the same instant.
+4. **Add a random part, called jitter,** of 0 to 25% of each delay. Without it, devices that lost the broker at the same instant return at the same instant.
 </Steps>
 
 ```text
@@ -1613,11 +1701,11 @@ delay = min(backoff_initial * 2^attempt, backoff_max) + random(0, delay/4)
 /* In mqtt_event_handler, MQTT_EVENT_DISCONNECTED case */
 int jitter = (esp_random() % (backoff_ms / 4 + 1));
 int delay = backoff_ms + jitter;
-vTaskDelay(pdMS_TO_TICKS(delay));
+next_attempt_us = esp_timer_get_time() + (int64_t)delay * 1000;
 backoff_ms = (int)(backoff_ms * 2.0);
 if (backoff_ms > 60000) backoff_ms = 60000;
 ```
-The ESP-IDF MQTT client can reconnect by itself. Your own code lets you choose the delays.
+The ESP-IDF MQTT client can reconnect by itself, every 10 seconds. With `disable_auto_reconnect` your own code chooses the delays, and a task (not the event handler) calls `esp_mqtt_client_reconnect()`.
 </TabItem>
 <TabItem label="Pico W (Python)">
 ```python
@@ -1648,11 +1736,11 @@ The STM32 uses the tick counter `HAL_GetTick()` as a rough random source. On an 
 <InArticleAd />
 
 
-When the MQTT connection drops, the device can discard its readings or keep them for later. Keeping them is usually worth the extra code, because a gap in the record hides exactly the event you want to study afterwards.
+When the connection drops, the device can discard its readings or keep them. Keeping them is worth the code: a gap in the record hides exactly the event you want to study afterwards.
 
 ### Buffer Architecture
 
-The buffer is a circular array, like a notebook with a fixed number of lines: when the last line is full, writing continues on the first line and replaces the oldest reading. So the buffer holds the newest readings, and its size sets how long an outage it can cover. With 50 entries and one reading every 10 seconds, that is 500 seconds, a little over 8 minutes. After a reconnect, the stored readings are published first, oldest first.
+The buffer is a circular array, like a notebook with a fixed number of lines: when the last line is full, writing continues on the first line over the oldest reading. So it holds the newest readings, and its size sets the outage it covers: 50 entries at one reading every 10 seconds is 500 seconds, a little over 8 minutes. After a reconnect the stored readings are published first, oldest first.
 
 In the listings, notice the store function, which writes one reading and moves the write position, and the flush function, which publishes the stored readings with a pause of 50 ms between them. The ESP32 and Pico versions keep the time of each measurement. The Pico flush publishes with QoS 0, so it is not confirmed.
 
@@ -1951,11 +2039,13 @@ The `mosquitto_sub` terminal now shows the messages of all three devices, mixed:
 ```text title="mosquitto_sub output"
 factory/warehouse-a/esp32/esp32-001/telemetry {"device_id":"esp32-001","ts":1710028800,"temperature":24.5,"humidity":58.3}
 factory/warehouse-a/pico/pico-001/telemetry {"device_id":"pico-001","ts":1710028805,"temperature":25.1,"humidity":61.2}
-factory/warehouse-a/stm32/stm32-001/telemetry {"device_id":"stm32-001","ts":1710028808,"temperature":23.8,"humidity":55.7}
+factory/warehouse-a/stm32/stm32-001/telemetry {"device_id":"stm32-001","ts":null,"temperature":23.8,"humidity":55.7}
 factory/warehouse-a/esp32/esp32-001/telemetry {"device_id":"esp32-001","ts":1710028810,"temperature":24.6,"humidity":58.1}
 factory/warehouse-a/pico/pico-001/telemetry {"device_id":"pico-001","ts":1710028815,"temperature":25.0,"humidity":61.0}
 ...
 ```
+
+**Check it.** `date -u -d @1710028800` turns a `ts` into a date: it must be the current UTC time within seconds (1970 or 2021 means the clock was never set). Side by side for ten minutes, the three BME280s should agree within about 1 °C and 3 %RH, the sensor's accuracy; one further off is faulty or warmed by its board. Each device's readings arrive 10 s apart, within a second.
 
 ### Testing Disconnection and Reconnection
 
@@ -1975,7 +2065,7 @@ To verify the reconnection and buffering logic:
      -t "factory/warehouse-a/esp32/esp32-001/commands" \
      -m '{"command":"set_interval","value":30}'
    ```
-   The ESP32 serial monitor should show that it received the command and read the new interval of 30 seconds. The ESP32 example only logs the value; the Pico W client also applies it.
+   The ESP32 serial monitor should show that it received the command and set the interval to 30 seconds, and the readings in `mosquitto_sub` should now come 30 seconds apart. Send `"value":0` as well: the device must refuse it and keep 30, because an interval of 0 would publish without pause.
 </Steps>
 
 ### Testing with SiliconWit.io

@@ -301,10 +301,11 @@ def get_device(device_id):
 def update_device_config(device_id, config):
     """Update a device's configuration. Returns True if found."""
     conn = get_db()
-    now = datetime.now(timezone.utc).isoformat()
+    # last_seen is not touched: a change made by a person is not a sign
+    # of life from the device, and a dead device must not look alive
     cursor = conn.execute(
-        "UPDATE devices SET config = ?, last_seen = ? WHERE device_id = ?",
-        (json.dumps(config), now, device_id)
+        "UPDATE devices SET config = ? WHERE device_id = ?",
+        (json.dumps(config), device_id)
     )
     conn.commit()
     updated = cursor.rowcount > 0
@@ -736,7 +737,9 @@ if __name__ == "__main__":
     init_db()
     print(f"\n  Default API key: {DEFAULT_KEY}")
     print(f"  Use: curl -H 'Authorization: Bearer {DEFAULT_KEY}' ...\n")
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # debug=False: the debug reloader runs this file twice and prints two
+    # keys (only the second works), and its debugger must never face a network
+    app.run(host="0.0.0.0", port=5000, debug=False)
 ```
 
 ### Testing the API with curl
@@ -821,6 +824,8 @@ Start the server and test each endpoint:
    ```
 </Steps>
 
+**Check it.** Each answer has a code you can predict: 201 for steps 2, 4 and 7, 200 for the others. Send step 2 again: it must give 409. Leave out the `Authorization` line of step 3: 401. The device's `last_seen` must be the time of step 4, the only request that came from the device; a configuration change by a person does not move it.
+
 :::caution[A command that was sent is not a command that was done]
 In step 7 the server answered `pending`. That means the command is stored. It does not mean that the device restarted, and in this lesson nothing delivers the command yet. A complete system sends the command, waits for the device to answer that it acted, and only then marks it done. With no answer in time, it marks the command failed and tells a person. On SiliconWit.io a command goes to the topic `d/<id>/c` and the device answers within 30 seconds on `d/<id>/k/<session>`.
 
@@ -897,7 +902,7 @@ To learn that a device went offline, your program could ask the API every few se
 
 Anyone who knows your webhook URL could send fake events. A signature stops this. The platform and your server share a secret key. The platform passes the secret and the request body through HMAC-SHA256, a function that mixes the two into a short code, and sends the code in a header. Your server computes the same code and compares. Only someone who holds the secret can produce a code that matches.
 
-The signature does not hide the event, so use HTTPS. It does not stop someone who recorded a genuine request from sending it again later, so check the time in the event and its `alert_id`.
+The signature does not hide the event, so use HTTPS. It does not stop someone who recorded a genuine request from sending it again later, so check the time in the event and its `alert_id`. The receiver below remembers every `alert_id` it has handled; a limit on the age of an event must allow for retries, which can come minutes later.
 
 ```
 POST /webhooks/iot HTTP/1.1
@@ -930,6 +935,10 @@ logger = logging.getLogger("webhook")
 
 # Shared secret (in production, load from environment variable)
 WEBHOOK_SECRET = "your-webhook-secret-change-this"
+
+# alert_id values already handled (in production: a database table that
+# keeps them for a few days)
+handled_alert_ids = set()
 
 def verify_signature(payload_bytes, signature_header):
     """
@@ -1027,15 +1036,25 @@ def webhook_endpoint():
         event.get("device_id"),
     )
 
-    # Step 5: Process the event
-    process_event(event)
+    # Step 5: A repeat (a retry by the platform, or a recorded request sent
+    # again) is acknowledged with 200 but not acted on a second time
+    alert_id = event.get("alert_id")
+    if alert_id in handled_alert_ids:
+        logger.info("Repeat of %s ignored", alert_id)
+        return jsonify({"status": "ok", "duplicate": True}), 200
 
-    # Step 6: Return 200 to acknowledge receipt
+    # Step 6: Process the event, and remember it
+    process_event(event)
+    if alert_id:
+        handled_alert_ids.add(alert_id)
+
+    # Step 7: Return 200 to acknowledge receipt
     return jsonify({"status": "ok", "received": True}), 200
 
 if __name__ == "__main__":
     logger.info("Webhook receiver starting on port 8080")
-    app.run(host="0.0.0.0", port=8080, debug=True)
+    # Never debug=True on an address the internet can reach
+    app.run(host="0.0.0.0", port=8080, debug=False)
 ```
 
 ### Testing the Webhook Receiver
@@ -1132,6 +1151,8 @@ INFO:webhook:ALERT: Device esp32-001, temperature = 38.7 (threshold: 35.0, sever
 WARNING:webhook:Invalid signature from 127.0.0.1
 ```
 
+Flask adds one `INFO:werkzeug` line for each request, left out here. **Check it:** run `test_webhook.py` a second time. Tests 1 and 2 must now log `Repeat of alert-001 ignored` and `Repeat of alert-002 ignored` and still answer 200 (so the platform stops retrying), and test 3 must still get 401. Then change one character of `WEBHOOK_SECRET` in the test script only: every event must get 401.
+
 ## SiliconWit.io Webhook Payloads
 
 <InArticleAd />
@@ -1211,6 +1232,8 @@ def get_readings_range(device_id, start, end, limit=1000):
 </TabItem>
 <TabItem label="InfluxDB">
 ```python title="InfluxDB query (using influxdb-client)"
+import re
+from datetime import datetime, timezone
 from influxdb_client import InfluxDBClient
 
 INFLUX_URL = "http://localhost:8086"
@@ -1223,8 +1246,21 @@ client = InfluxDBClient(
 )
 query_api = client.query_api()
 
+def flux_time(text):
+    """ISO 8601 text -> RFC 3339 UTC, the form Flux reads. ValueError if not a time."""
+    t = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)  # treat a time without zone as UTC
+    return t.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
 def get_readings_range_influx(device_id, start, end, limit=1000):
     """Query InfluxDB for sensor readings in a time range."""
+    # Request values go into the Flux text, so check them first, as the
+    # SQLite version does with ? marks: a device_id holding a quote
+    # could otherwise change the query
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", device_id):
+        raise ValueError("invalid device_id")
+    start, end, limit = flux_time(start), flux_time(end), int(limit)
     query = f'''
         from(bucket: "{INFLUX_BUCKET}")
           |> range(start: {start}, stop: {end})
@@ -1258,7 +1294,7 @@ Both databases serve the same REST endpoints, so the dashboard or mobile app tha
 <InArticleAd />
 
 
-MQTT is the main data path, but sometimes the broker cannot be reached while the network still works. A device can then send the reading by HTTP POST. This ESP-IDF code sends sensor data to your REST API (or to SiliconWit.io's ingest endpoint) when MQTT fails. It treats only the status 201 as success.
+MQTT is the main data path, but sometimes the broker cannot be reached while the network still works. A device can then send the reading by HTTP POST. This ESP-IDF code sends sensor data to your REST API (or to SiliconWit.io's ingest endpoint) when MQTT fails. It treats only the status 201 as success, and returns `ESP_FAIL` for any other status, so the caller can keep the reading.
 
 ```c title="http_fallback.c"
 #include <stdlib.h>
@@ -1320,6 +1356,7 @@ esp_err_t http_post_sensor_data(float temperature, float humidity)
             ESP_LOGI(TAG, "Data ingested successfully via HTTP");
         } else {
             ESP_LOGW(TAG, "Server returned status %d", status);
+            err = ESP_FAIL;  /* a 401 or 429 is not a stored reading */
         }
     } else {
         ESP_LOGE(TAG, "HTTP POST failed: %s", esp_err_to_name(err));

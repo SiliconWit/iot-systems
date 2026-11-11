@@ -534,6 +534,8 @@ acl_file /etc/mosquitto/acl.conf
 
 With this setup, a device with CN=`sensor-001` can only publish to `devices/sensor-001/telemetry/#` and subscribe to `devices/sensor-001/commands/#`. An attacker who copies the certificate and key out of one device cannot act as a different device. The attacker can still send false data as that one device, until you revoke its certificate.
 
+**Check it.** Run these tests against the broker; each result was seen in a test with this configuration and certificates made by the commands above. `sensor-001` publishing to its own `devices/sensor-001/telemetry/...` is accepted, and the broker log shows `u'sensor-001'` as the username. Publishing to `devices/sensor-002/...` is accepted by the client with no error, but the log says `Denied PUBLISH` and no subscriber receives it. Without `--cert` and `--key` the client prints `A TLS error occurred` (log: `peer did not return a certificate`). A certificate made by anyone else, even with `CN=sensor-001`, fails the same way (log: `certificate verify failed`). Note what is missing: a certificate that you signed stays valid until it expires. To shut out one stolen device sooner, revoke its certificate and give Mosquitto the revocation list with `crlfile`.
+
 ## ESP32 Mutual TLS Client
 
 <InArticleAd />
@@ -997,10 +999,12 @@ Device (first boot)                    Provisioning Server
 
 </Steps>
 
-This is a minimal Python provisioning server. `/provision` accepts a token once, signs the request and returns the certificate. `/generate-token` makes tokens and has no login as written, so only you must be able to reach it. The server holds the Intermediate CA key: whoever controls it can issue device certificates.
+This is a minimal Python provisioning server (`pip install flask cryptography`). `/provision` accepts a token once, checks that the request names the device the token was made for, signs it and returns the certificate. `/generate-token` makes tokens and has no login as written, so only you must be able to reach it. The server holds the Intermediate CA key: whoever controls it can issue device certificates.
 
 ```python title="provisioning_server.py"
 from flask import Flask, request, jsonify
+from cryptography import x509
+from cryptography.x509.oid import NameOID
 import subprocess
 import os
 import secrets
@@ -1036,6 +1040,17 @@ def provision_device():
         return jsonify({"error": "Invalid or used token"}), 403
 
     device_id = tokens[token]["device_id"]
+
+    # The CSR must name the device the token was made for. Without this
+    # check, a token for sensor-007 can ask for CN=admin and, with
+    # use_identity_as_username, receive the admin rights of the ACL.
+    try:
+        csr = x509.load_pem_x509_csr(csr_pem.encode())
+    except ValueError:
+        return jsonify({"error": "Invalid CSR"}), 400
+    cns = [a.value for a in csr.subject.get_attributes_for_oid(NameOID.COMMON_NAME)]
+    if not csr.is_signature_valid or cns != [device_id]:
+        return jsonify({"error": "CSR name does not match the token"}), 403
 
     # Write CSR to temp file
     csr_path = f"/tmp/{device_id}.csr"
@@ -1277,7 +1292,7 @@ int verify_firmware_signature(const uint8_t *image, size_t image_len)
 }
 ```
 
-In your OTA update handler, download the signed image, call `verify_firmware_signature()`, and continue to `esp_ota_write()` only if it passes.
+The function above needs the whole image in memory, which suits a test on a computer but not the device: an application image is about 1 MB, and an ESP32 has about 300 KB of free RAM. On the device, hash the image as it arrives. Pass each received chunk to `mbedtls_sha256_update()` and to `esp_ota_write()`, keep the last 256 bytes (the signature) out of both, then check the finished hash with `mbedtls_pk_verify()` before `esp_ota_end()` and `esp_ota_set_boot_partition()`. If the check fails, call `esp_ota_abort()`: the written partition is never started, and the running firmware stays.
 
 ## Network Segmentation
 
@@ -1453,7 +1468,7 @@ Build a minimal provisioning system:
 2. Generate three provisioning tokens using the `/generate-token` endpoint.
 3. Write ESP32 firmware that, on first boot, generates a key pair, creates a CSR, sends it to the provisioning server with the token, and stores the returned certificate in NVS.
 4. On subsequent boots, the firmware should skip provisioning and connect directly with the stored certificate.
-5. Verify that using the same token twice is rejected.
+5. Verify that using the same token twice is rejected, and that a token sent with a CSR for another name (for example `CN=admin`) gets 403.
 6. Verify that provisioned devices can connect to Mosquitto with mTLS.
 
 **Deliverable:** Three provisioned devices that Mosquitto accepts, and a short description of the flow.

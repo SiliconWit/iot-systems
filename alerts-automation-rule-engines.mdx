@@ -384,7 +384,12 @@ class AlertEngine:
                 # Extract the field value
                 field = rule.get("field")
                 if field and field in payload:
-                    value = float(payload[field])
+                    # null, text or a missing sensor: skip the reading. An
+                    # exception here would end loop_forever and the engine.
+                    try:
+                        value = float(payload[field])
+                    except (TypeError, ValueError):
+                        continue
                     state.update_value(value, now)
                 elif rule["operator"] == "inactivity":
                     # Any message on this topic resets inactivity
@@ -438,6 +443,15 @@ class AlertEngine:
 
         print(f"[{alert_data['timestamp']}] ALERT: {message}")
 
+        # Send from a separate thread. This method runs in the MQTT network
+        # thread with the lock held: a mail server that takes 30 s would
+        # stop every rule and the keepalive with it.
+        threading.Thread(
+            target=self._notify_all, args=(rule, alert_data, message),
+            daemon=True,
+        ).start()
+
+    def _notify_all(self, rule, alert_data, message):
         for action in rule.get("actions", []):
             notifier = self.notifiers.get(action)
             if notifier:
@@ -531,7 +545,7 @@ def send_email(alert_data, message):
     msg.attach(MIMEText(message, "plain"))
     msg.attach(MIMEText(html, "html"))
 
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
         server.starttls()
         server.login(SMTP_USER, SMTP_PASSWORD)
         server.sendmail(SMTP_USER, RECIPIENT, msg.as_string())
@@ -576,6 +590,7 @@ def send_sms(alert_data, message):
             "Body": body,
         },
         auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+        timeout=10,  # never wait for ever on a network call
     )
 
     if resp.status_code == 201:
@@ -615,7 +630,7 @@ def send_discord(alert_data, message):
         ]
     }
 
-    resp = requests.post(DISCORD_WEBHOOK_URL, json=payload)
+    resp = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
 
     if resp.status_code == 204:
         print("  Discord notification sent")
@@ -666,7 +681,7 @@ def send_slack(alert_data, message):
         ]
     }
 
-    resp = requests.post(SLACK_WEBHOOK_URL, json=payload)
+    resp = requests.post(SLACK_WEBHOOK_URL, json=payload, timeout=10)
 
     if resp.status_code == 200:
         print("  Slack notification sent")
@@ -708,6 +723,7 @@ def send_telegram(alert_data, message):
             "text": text,
             "parse_mode": "HTML",
         },
+        timeout=10,
     )
 
     if resp.status_code == 200:
@@ -785,6 +801,8 @@ done
 ```
 
 The single message of the first test only starts the 30-second timer. The loop of the second test keeps the value above the limit long enough, and the engine prints the alert and sends the notifications.
+
+**Check it.** Count the alerts, not just their presence. The loop sends 12 readings 5 seconds apart, so the timer starts at the first and the seventh (30 seconds later) fires the alert: one `ALERT` line about 30 seconds after the loop starts, then silence for the 5 minutes of cooldown, although five more readings are above the limit. Then publish `{"temperature": null}`: the engine must skip it and keep running. A second alert inside the cooldown, or an engine that stops, means the rule or the code is wrong.
 
 ## SiliconWit.io Alert System
 
@@ -942,6 +960,8 @@ msg.exceeded = (temp > 35);
 return msg;
 ```
 
+Then add a **filter** node (named rbe in older versions) set to "block unless value changes" on the property `msg.exceeded`. Without it, every reading above 35 sends a Slack message, one every 10 seconds through a hot afternoon, which is the alert people learn to ignore, and every reading below 35 sends one more `fan_off`. With it, each crossing of the limit sends one message and one command. For a value that hovers at 35, add the hysteresis of the automation patterns below.
+
 #### Step 3: Switch Node (Route by Condition)
 
 Connect a **switch** node after the function node. Configure it to route on the property `msg.exceeded`:
@@ -1006,7 +1026,19 @@ When the flow works, click the menu (top right), then **Export**, to get it as J
     "id": "func_eval",
     "type": "function",
     "name": "Evaluate Threshold",
-    "func": "var temp = msg.payload.temperature;\nif (temp === undefined) return null;\nmsg.temperature = temp;\nmsg.threshold = 35;\nmsg.exceeded = (temp > 35);\nreturn msg;",
+    "func": "var temp = msg.payload.temperature;\nif (temp === undefined || temp === null) return null;\nmsg.temperature = temp;\nmsg.threshold = 35;\nmsg.exceeded = (temp > 35);\nreturn msg;",
+    "wires": [["rbe_1"]]
+  },
+  {
+    "id": "rbe_1",
+    "type": "rbe",
+    "name": "Only changes of exceeded",
+    "func": "rbe",
+    "gap": "",
+    "start": "",
+    "inout": "out",
+    "septopics": true,
+    "property": "exceeded",
     "wires": [["switch_1"]]
   },
   {

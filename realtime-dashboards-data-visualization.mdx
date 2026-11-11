@@ -330,6 +330,13 @@ mkdir -p telegraf
     topic = "factory/+/+"
     measurement = "measurement/_/_"
     tags = "_/zone/metric"
+
+  # The five-level topics of the three-node network, such as
+  # factory/warehouse-a/esp32/esp32-001/telemetry
+  [[inputs.mqtt_consumer.topic_parsing]]
+    topic = "factory/+/+/+/+"
+    measurement = "_/_/_/_/measurement"
+    tags = "site/building/device_type/device/_"
 ```
 
 After creating the config, restart the Telegraf container:
@@ -391,6 +398,12 @@ Edit the Telegraf configuration file:
     topic = "factory/+/+"
     measurement = "measurement/_/_"
     tags = "_/zone/metric"
+
+  # The five-level topics of the three-node network
+  [[inputs.mqtt_consumer.topic_parsing]]
+    topic = "factory/+/+/+/+"
+    measurement = "_/_/_/_/measurement"
+    tags = "site/building/device_type/device/_"
 ```
 
 Restart Telegraf:
@@ -416,7 +429,7 @@ QoS 1 here covers one step: from the broker to Telegraf, while Telegraf is conne
 
 **Topic parsing.** A JSON payload says "temperature 24.5" but not which device measured it. That information is in the topic. Without topic parsing, every message goes into one measurement called `mqtt_consumer` with no device or location. The `topic_parsing` blocks take labels from the levels of the topic. A message on `sensors/esp32-01/bme280` goes into a measurement named `sensors` with the tags `device=esp32-01` and `sensor_type=bme280`. Then Grafana can filter and group by device.
 
-Each pattern here has three levels, and a `+` stands for exactly one level. A topic with another number of levels, such as the five-level topics of the three-node network, matches no pattern and goes into `mqtt_consumer`. Such topics need their own `topic_parsing` block with five levels.
+Each pattern here has three levels, and a `+` stands for exactly one level. A topic with another number of levels matches no pattern and goes into `mqtt_consumer`. The last block is for the five-level topics of the three-node network: `factory/warehouse-a/esp32/esp32-001/telemetry` goes into the measurement `telemetry` with the tags `site`, `building`, `device_type` and `device`.
 
 ### Verify Data Ingestion
 
@@ -450,13 +463,15 @@ Every panel you build is a question to InfluxDB, so you need to know how it file
 
 **Bucket.** A bucket is the logbook itself, the place where the data is stored. Each bucket has a retention period and deletes data older than that by itself. The `iot_sensors` bucket keeps data for 30 days.
 
-**Measurement.** A measurement is a named group of data points, like a table in other databases. With the Telegraf topic parsing above, the name is the first level of the MQTT topic (`sensors`, `home`, `factory`).
+**Measurement.** A measurement is a named group of data points, like a table in other databases. With the Telegraf topic parsing above, the name is the first level of a three-level topic (`sensors`, `home`, `factory`), and the last level of a five-level one (`telemetry`).
 
 **Tags.** Tags are the labels: which device, which location, which type of sensor. They are text, and InfluxDB keeps an index of them (a list for fast lookup), so a search by tag is fast.
 
 **Fields.** Fields are the measured values: temperature, humidity, pressure, voltage. They have no index, so a search by field value must read every point.
 
-**Timestamp.** Every data point has a time, stored to the nanosecond. If the MQTT payload contains no time, Telegraf uses the time at which the message arrived.
+**Timestamp.** Every data point has a time, stored to the nanosecond. With the configuration above, Telegraf gives each reading the time at which the message arrived, even when the JSON carries the device's own `ts`.
+
+That matters after an outage: readings the device kept in its offline buffer and sends on reconnection are all stored at the moment of reconnection, so the chart shows a burst there and a gap where they belong. To store the measured time, add `json_time_key = "ts"` and `json_time_format = "unix"` to the `mqtt_consumer` block, and only when every device sets its clock (the null `ts` of a device without a clock cannot be used; test how your Telegraf version treats such a message before you rely on it).
 
 ### Tags vs Fields: When to Use Each
 
@@ -553,7 +568,9 @@ This returns only data points where the temperature is above 40 degrees or below
 Create a scheduled task that downsamples raw data into 5-minute averages:
 
 ```flux title="InfluxDB downsampling task"
-option task = {name: "downsample_5m", every: 10m}
+// offset: run 1 minute late, so points that reach the database a few
+// seconds after a window closes are still in it (the range is unchanged)
+option task = {name: "downsample_5m", every: 10m, offset: 1m}
 
 from(bucket: "iot_sensors")
   |> range(start: -10m)
@@ -562,7 +579,7 @@ from(bucket: "iot_sensors")
   |> to(bucket: "iot_sensors_weekly", org: "siliconwit")
 ```
 
-This task runs every 10 minutes, reads the last 10 minutes of raw data, computes 5-minute averages, and writes the results to the `iot_sensors_weekly` bucket (which you would create with a 365-day retention policy).
+This task runs every 10 minutes (1 minute after each 10-minute mark), reads the last 10 minutes of raw data, computes 5-minute averages, and writes the results to the `iot_sensors_weekly` bucket (which you would create with a 365-day retention policy).
 
 ## Setting Up Grafana
 
@@ -864,7 +881,7 @@ iot-dashboard/
 
 ### HTML Page
 
-The page loads two libraries (Chart.js and an MQTT client for browsers) and holds the empty places for the number cards and the charts.
+The page loads three libraries (Chart.js, its annotation plugin for the limit line, and an MQTT client for browsers) and holds the empty places for the number cards and the charts.
 
 ```html title="index.html"
 <!DOCTYPE html>
@@ -875,6 +892,8 @@ The page loads two libraries (Chart.js and an MQTT client for browsers) and hold
   <title>IoT Sensor Dashboard</title>
   <link rel="stylesheet" href="style.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4"></script>
+  <!-- Draws the "Max Safe" line; without it the annotation block does nothing -->
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1"></script>
   <script src="https://cdn.jsdelivr.net/npm/mqtt@5.3.0/dist/mqtt.min.js"></script>
 </head>
 <body>
@@ -948,7 +967,7 @@ h1 {
   display: block;
   font-size: 2rem;
   font-weight: bold;
-  color: #0f3460;
+  color: #f5f5f5;  /* light on the dark card, or the number cannot be read */
 }
 .stat-unit {
   font-size: 0.9rem;
@@ -967,7 +986,7 @@ h1 {
 
 ### JavaScript Application
 
-The script has three parts: it creates the two charts, it connects to the broker over a WebSocket and subscribes to `sensors/#`, and for each message it reads the JSON and adds a point. Notice `addDataPoint`: it removes the oldest point when a chart has more than 60, so the page does not grow without limit.
+The script has three parts: it creates the two charts, it connects to the broker over a WebSocket and subscribes to `sensors/#`, and for each message it reads the JSON and adds a point. Notice `addDataPoint`: it removes the oldest point when a chart has more than 60, so the page does not grow without limit. Each chart has one line, so subscribe to one device's topic (for example `sensors/esp32-01/#`): with `sensors/#` and two devices, their readings are joined into one zigzag line that belongs to neither.
 
 ```javascript title="app.js"
 // Configuration
@@ -1019,7 +1038,7 @@ const tempChart = new Chart(tempCtx, {
             borderDash: [6, 4],
             label: {
               content: "Max Safe",
-              enabled: true,
+              display: true,  /* "enabled" in plugin versions before 2 */
               position: "start",
             },
           },
@@ -1038,7 +1057,7 @@ const humChart = new Chart(humCtx, {
     datasets: [{
       label: "Humidity (%)",
       data: [],
-      borderColor: "#0f3460",
+      borderColor: "#4cc9f0",  /* a dark blue line is lost on the dark card */
       backgroundColor: "rgba(15, 52, 96, 0.1)",
       fill: true,
       tension: 0.3,
@@ -1335,6 +1354,8 @@ Follow one sensor reading through the whole chain to check that every part works
    ```
 
 6. **Verify the Chart.js dashboard** by opening `http://localhost:8080`. It should show the same data updating in real time via the WebSocket MQTT connection.
+
+7. **Check it.** Run the loop of step 5 again with `seq 1 30` (150 seconds), and after about 20 seconds stop Telegraf (`docker stop telegraf`) for one minute. The Grafana chart must show a gap of about 12 points (60 s at one reading every 5 s), and the stat panel must keep showing the last stored value with no warning: that is the "looks normal" failure. Start Telegraf again. Then compare the newest stored value with the last line `mosquitto_pub` sent: they must be equal, and its `_time` must be within about 10 seconds (one flush interval) of the moment it was sent.
 </Steps>
 
 ## Exercises

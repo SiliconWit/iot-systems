@@ -270,7 +270,11 @@ password_file /etc/mosquitto/passwd
 
 # ── Persistence ──
 persistence true
-persistence_location /var/lib/mosquitto/
+# The Debian, Ubuntu and Raspberry Pi OS main file already sets
+# persistence_location and "log_dest file". A second value stops
+# Mosquitto ("Duplicate ... value"), so remove the # below only if
+# your mosquitto.conf does not set them.
+# persistence_location /var/lib/mosquitto/
 autosave_interval 300
 
 # ── Limits ──
@@ -280,7 +284,7 @@ max_queued_messages 1000
 message_size_limit 262144
 
 # ── Logging ──
-log_dest file /var/log/mosquitto/mosquitto.log
+# log_dest file /var/log/mosquitto/mosquitto.log
 log_type error
 log_type warning
 log_type notice
@@ -289,6 +293,8 @@ connection_messages true
 log_timestamp true
 log_timestamp_format %Y-%m-%dT%H:%M:%S
 ```
+
+Read the main file first (`grep -v '^#' /etc/mosquitto/mosquitto.conf`): Mosquitto refuses to start when a one-value setting such as `persistence_location` appears twice, and says why in `sudo journalctl -u mosquitto -n 20`, not in its log file.
 
 **Key directives explained:**
 
@@ -310,7 +316,7 @@ sudo systemctl restart mosquitto
 sudo systemctl status mosquitto
 ```
 
-If the service fails to start, check the log:
+If the service fails to start, check the log (and the journal, as above, for a mistake in the configuration):
 
 ```bash title="View Mosquitto log for errors"
 sudo tail -50 /var/log/mosquitto/mosquitto.log
@@ -555,16 +561,20 @@ You need three files: the CA certificate, the server certificate, and the server
      -subj "/C=US/ST=State/L=City/O=MyIoTLab/CN=your-broker-hostname"
    ```
 
-   :::tip[CN must match the broker hostname]
-   The Common Name (CN) in the server certificate must match the hostname that clients use to connect. If clients connect via IP address, use that IP as the CN. If they connect via a DNS name like `mqtt.local`, use that as the CN.
+   :::tip[The certificate must name the broker the way clients reach it]
+   Clients compare the name they connect to with the names in the certificate's Subject Alternative Name (SAN) field. A browser ignores the Common Name (CN), and an IP address only in the CN fails in Python and Node.js ("IP address mismatch"). Put every name and IP address that clients use in the SAN (next step).
    :::
 
-6. Sign the server certificate with the CA (valid for 1 year):
+6. Write the names clients use into a small file, then sign the server certificate with the CA (valid for 1 year):
 
    ```bash title="Sign server certificate"
+   echo "subjectAltName=DNS:your-broker-hostname,IP:192.168.1.50" \
+     | sudo tee server.ext
    sudo openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key \
-     -CAcreateserial -out server.crt -days 365
+     -CAcreateserial -out server.crt -days 365 -extfile server.ext
    ```
+
+   Check that the names are there: `openssl x509 -in server.crt -noout -text | grep -A1 "Alternative"`.
 
 7. Set proper permissions so Mosquitto can read the files:
 
@@ -619,7 +629,8 @@ acl_file /etc/mosquitto/acl
 
 # ── Persistence ──
 persistence true
-persistence_location /var/lib/mosquitto/
+# Already set in the Debian main file (see the basic configuration)
+# persistence_location /var/lib/mosquitto/
 autosave_interval 300
 
 # ── Limits ──
@@ -629,7 +640,7 @@ max_queued_messages 1000
 message_size_limit 262144
 
 # ── Logging ──
-log_dest file /var/log/mosquitto/mosquitto.log
+# log_dest file /var/log/mosquitto/mosquitto.log
 log_type error
 log_type warning
 log_type notice
@@ -674,7 +685,7 @@ mosquitto_sub -h your-broker-hostname -p 8883 \
   -t "sensors/#"
 ```
 
-If connecting by IP address and your certificate CN is a hostname, you may need to add `--insecure` to skip hostname verification during testing. Do not use `--insecure` in production.
+If you connect by an IP address that is not in the certificate's SAN, the name check fails. Add the address to `server.ext` and sign again; for a quick test only, `--insecure` skips the name check. Do not use `--insecure` in production.
 
 ```bash title="Connect by IP (testing only)"
 mosquitto_pub -h 192.168.1.50 -p 8883 \
@@ -688,7 +699,7 @@ mosquitto_pub -h 192.168.1.50 -p 8883 \
 <InArticleAd />
 
 
-[SiliconWit.io](https://siliconwit.io) is a connected operations platform that provides real-time monitoring, dashboards, alerts (email, SMS, Discord, Slack, Telegram), remote device control, automation rules, AI analytics, and a REST API. Its MQTT endpoint lets devices publish telemetry and receive commands. When you register a device on the platform, you receive credentials and a topic structure that keeps each device isolated.
+[SiliconWit.io](https://siliconwit.io) is a connected operations platform that provides real-time monitoring, dashboards, alerts (email, SMS, Slack, Discord, webhooks), remote device control, automation rules, AI analytics, and a REST API. Its MQTT endpoint lets devices publish telemetry and receive commands. When you register a device on the platform, you receive credentials and a topic structure that keeps each device isolated.
 
 ### Connection Details
 
@@ -811,12 +822,13 @@ remote_password YOUR_ACCESS_TOKEN
 bridge_capath /etc/ssl/certs/
 bridge_protocol_version mqttv311
 
-# Topic mapping:
-# Forward local "sensors/#" to cloud "d/DEVICE_ID/t" (outgoing only)
-topic sensors/# out 1 "" d/YOUR_DEVICE_ID/t/
+# Topic mapping, one exact topic each way.
+# With "" as the pattern, the two names are full topic names.
+# Local readings of node 01 -> the device's telemetry topic
+topic "" out 1 sensors/node01/temperature d/YOUR_DEVICE_ID/t
 
-# Forward cloud commands to local (incoming only)
-topic # in 1 commands/cloud/ d/YOUR_DEVICE_ID/c/
+# The device's command topic -> the local command topic of node 01
+topic "" in 1 commands/node01 d/YOUR_DEVICE_ID/c
 
 # Bridge options
 cleansession false
@@ -824,6 +836,8 @@ start_type automatic
 restart_timeout 10
 try_private false
 notifications true
+# Publish the bridge status here only, not on the platform
+notifications_local_only true
 notification_topic bridge/siliconwit/status
 ```
 
@@ -834,10 +848,12 @@ notification_topic bridge/siliconwit/status
 - **`both`**: Bidirectional forwarding.
 
 In this configuration:
-- Local messages matching `sensors/#` are forwarded to the cloud under `d/DEVICE_ID/t/sensors/#`.
-- Cloud messages under `d/DEVICE_ID/c/#` appear locally under `commands/cloud/#`.
+- A local message on `sensors/node01/temperature` is published on the cloud as `d/YOUR_DEVICE_ID/t`.
+- A cloud command on `d/YOUR_DEVICE_ID/c` appears locally on `commands/node01`, which node 01 may read by its ACL.
 
-The `cleansession false` setting ensures that if the bridge disconnects temporarily (internet outage), the cloud platform queues messages, and the bridge receives them when it reconnects.
+A pattern such as `topic sensors/# out 1 "" d/YOUR_DEVICE_ID/t/` keeps the rest of the local name, so a reading lands on `d/YOUR_DEVICE_ID/t/sensors/node01/temperature`. The platform takes telemetry on `d/<device id>/t`, and a broker that allows each device only its own topics refuses the longer name (a test bridge between two Mosquitto brokers logged "Denied PUBLISH"). The bridge also logs in as one device: send all the readings of node 01 in one JSON message, and give a second node its own device and `connection` block.
+
+With `cleansession false`, the local broker keeps outgoing QoS 1 readings during an outage (up to `max_queued_messages`) and sends them on reconnection; a remote broker that keeps sessions does the same for commands. So a command can arrive late. A SiliconWit.io command carries a `timestamp` and a `timeout` (30 seconds): the device must ignore an older one, or a pump switched on an hour ago starts now.
 
 ### Verifying the Bridge
 
@@ -998,7 +1014,7 @@ This rotates the log weekly, keeps 4 compressed copies, and sends a HUP signal t
 Docker runs a program in a container, a sealed box that holds the program and everything it needs. With Mosquitto in a container, the whole broker is one folder of files that you can copy to another machine and start with one command.
 
 :::tip[Podman as a Docker alternative]
-[Podman](https://podman.io) is an open source (Apache 2.0) container engine. It runs without root rights and needs no background service, which suits a gateway device. Most `docker compose` commands in this lesson work with `podman-compose`, but health checks in `depends_on` and networking between containers may need small changes. Test your Compose file with `podman-compose up` before you deploy.
+[Podman](https://podman.io) is an open source (Apache 2.0) container engine that runs without root rights or a background service, which suits a gateway. Most `docker compose` commands here work with `podman-compose`; health checks in `depends_on` and container networking may need small changes, so test with `podman-compose up` first.
 :::
 
 ### Directory Structure
@@ -1109,6 +1125,8 @@ services:
      mosquitto_passwd -c /mosquitto/config/passwd sensor_node_01
    ```
 
+   The tool asks for the password, so the container needs a terminal: if it stops with an error instead of a prompt, add `-it` after `docker run`.
+
    Add additional users the same way (without `-c`):
 
    ```bash title="Add more users"
@@ -1201,7 +1219,8 @@ acl_file /etc/mosquitto/acl
 
 # ── Persistence ──
 persistence true
-persistence_location /var/lib/mosquitto/
+# Set once only: the Debian main file already has these two
+# persistence_location /var/lib/mosquitto/
 autosave_interval 300
 
 # ── Connection limits ──
@@ -1211,10 +1230,11 @@ max_queued_messages 1000
 message_size_limit 262144
 
 # ── Keepalive ──
+# An MQTT 3.1.1 client that asks for more than 120 s is refused
 max_keepalive 120
 
 # ── Logging ──
-log_dest file /var/log/mosquitto/mosquitto.log
+# log_dest file /var/log/mosquitto/mosquitto.log
 log_type error
 log_type warning
 log_type notice
@@ -1223,6 +1243,17 @@ connection_messages true
 log_timestamp true
 log_timestamp_format %Y-%m-%dT%H:%M:%S
 ```
+
+### Check it
+
+Try each closed door from a second computer on the network:
+
+1. `mosquitto_pub -h your-broker-hostname -p 1883 -t x -m y` must fail to connect: no plain listener is open.
+2. `openssl s_client -connect your-broker-hostname:8883 -CAfile ca.crt -verify_hostname your-broker-hostname` must end with `Verify return code: 0 (ok)`. With a name that is not in the certificate it says `62 (Hostname mismatch)`, which is what an ESP32 would meet.
+3. Without `-u` and `-P`, a publish over TLS must print `Connection Refused: not authorised`.
+4. `sensor_node_01` publishing to `sensors/node02/temperature` must print nothing, deliver nothing to an admin subscriber on `#`, and add a `Denied PUBLISH` line to the log, even at QoS 1.
+
+A step that succeeds where it should fail is a door still open. Repeat the four checks after every change.
 
 ## Exercises
 
@@ -1233,7 +1264,7 @@ log_timestamp_format %Y-%m-%dT%H:%M:%S
 
 2. **Generate certificates and enable TLS.** Follow the OpenSSL steps in this lesson to generate your own CA certificate, server certificate, and server key. Configure Mosquitto to listen on port 8883 with TLS. Test the connection using `mosquitto_pub` and `mosquitto_sub` with the `--cafile` flag. Then intentionally break something (use the wrong CA file, use an expired certificate, use a mismatched hostname) and observe the error messages in both the client output and the Mosquitto log. Document each error and its cause.
 
-3. **Configure a bridge to SiliconWit.io.** Register a device on [siliconwit.io](https://siliconwit.io) and note your device ID and access token. Configure a Mosquitto bridge that forwards all messages under `sensors/#` to the cloud topic `d/{device_id}/t`. Publish test messages locally and verify they appear on the SiliconWit.io dashboard. Then disconnect your internet connection for 30 seconds while continuing to publish locally. Reconnect and verify that the queued messages arrive at the cloud (this tests `cleansession false` on the bridge). Measure the delay between reconnection and message delivery.
+3. **Configure a bridge to SiliconWit.io.** Register a device on [siliconwit.io](https://siliconwit.io) and note your device ID and access token. Configure a Mosquitto bridge that forwards one local topic, `sensors/node01/temperature`, to the cloud topic `d/{device_id}/t`. Publish test messages locally and verify they appear on the SiliconWit.io dashboard. Then disconnect your internet connection for 30 seconds while continuing to publish locally. Reconnect and verify that the queued messages arrive at the cloud (this tests `cleansession false` on the bridge). Measure the delay between reconnection and message delivery.
 
 4. **Deploy Mosquitto in Docker with persistence testing.** Set up the Docker deployment described in this lesson. Publish 10 retained messages to different topics. Stop the container with `docker compose down`, then start it again. Subscribe to the retained topics and verify all 10 messages survived the restart (this tests that the persistence volume mount works correctly). Then run a load test: use a bash loop to publish 1000 messages as fast as possible and check `$SYS/broker/messages/received` to confirm all 1000 arrived. Record the messages-per-second rate.
 

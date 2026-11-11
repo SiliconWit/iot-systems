@@ -429,7 +429,7 @@ void mqtt_connect_tls() {
 }
 ```
 
-SiliconWit.io accepts MQTT, CoAP, and HTTP. Connection details, certificates, and API keys are available at [siliconwit.io](https://siliconwit.io) (Dashboard -> Devices).
+SiliconWit.io accepts MQTT, CoAP, and HTTP. Connection details, certificates, and API keys are available at [siliconwit.io](https://siliconwit.io) (Dashboard -> Devices). It uses its own topic names (telemetry goes on `d/<device id>/t`), so change `MQTT_TOPIC` as well as the client: a publish on the bench topic is not stored there.
 
 ## CoAP Implementation
 
@@ -441,6 +441,8 @@ CoAP runs over UDP, so the ESP32 opens no connection. The program below uses no 
 ### CoAP Client Code
 
 Notice two functions. `build_coap_post` writes the 4-byte header, a 1-byte token, the path and the payload into a buffer. `send_coap` sends that buffer as one UDP packet and waits up to 2 seconds for the server's ACK, so here the measured time is a true round trip.
+
+The reply must be an ACK, carry the message ID that was sent (not a late ACK of the last message), and have a success code (2.xx). A server that does not know the path also answers with an ACK, coded 4.04 (Not Found), so checking the type alone reports success for a lost reading. Two limits of this sender: it sends a CON message once (a full CoAP client repeats it after 2 to 3 seconds, up to four times), and each path segment must be under 13 characters.
 
 ```cpp title="coap_sender.ino"
 #include <WiFi.h>
@@ -580,8 +582,12 @@ void send_coap(float temp, float hum, float pres) {
         if (reply_len > 0) {
             uint8_t reply[64];
             udp.read(reply, sizeof(reply));
-            /* Check for ACK type (0x60 = Ver=1, Type=ACK, TKL=0) */
-            if ((reply[0] & 0x30) == 0x20) {
+            /* An ACK (type bits 0x20) for this message ID, with a 2.xx
+             * success code: a 4.04 for a wrong path is also an ACK */
+            uint16_t sent_id = (uint16_t)(coap_msg_id - 1);
+            if (reply_len >= 4 && (reply[0] & 0x30) == 0x20 &&
+                ((reply[2] << 8) | reply[3]) == sent_id &&
+                (reply[1] >> 5) == 2) {
                 ack_received = true;
                 break;
             }
@@ -963,7 +969,11 @@ BenchResult bench_coap(const String& payload) {
         if (reply_len > 0) {
             uint8_t reply[64];
             udp.read(reply, sizeof(reply));
-            if ((reply[0] & 0x30) == 0x20) {
+            /* ACK, same message ID, 2.xx code (as in coap_sender) */
+            uint16_t sent_id = (uint16_t)(coap_msg_id - 1);
+            if (reply_len >= 4 && (reply[0] & 0x30) == 0x20 &&
+                ((reply[2] << 8) | reply[3]) == sent_id &&
+                (reply[1] >> 5) == 2) {
                 r.success = true;
                 break;
             }
@@ -1095,7 +1105,9 @@ Your numbers will differ with your network, but the order stays the same. Read i
 **Wire bytes (estimated):** The total bytes actually transmitted on the network, including protocol headers. Think of the reading as a letter and the protocol as its envelope: the letter is the same in all three, and only the envelope changes. The comparison stops at the address: in MQTT every character of the topic name is sent again with every message. Per protocol:
 - **MQTT:** fixed header (2 bytes, or 3 bytes when the rest of the packet is 128 bytes or longer, as it is here) + 2-byte topic length + topic string + payload. With the 28-character topic used here, MQTT adds 33 bytes of overhead on an existing connection. The TCP connection was already established, so there is no handshake cost.
 - **CoAP:** 4-byte fixed header + 1-byte token + options (Uri-Path, Content-Format) + 1-byte payload marker + payload + 8-byte UDP header. Total overhead is 30 bytes. No connection setup.
-- **HTTP:** The POST request includes the method line, Host header, Content-Type, Content-Length, and other headers. A typical HTTP POST adds 300 to 500 bytes of overhead. If TLS is used, the initial handshake adds several kilobytes.
+- **HTTP:** The POST request includes the method line, Host header, Content-Type, Content-Length, and other headers. A typical HTTP POST adds 300 to 500 bytes of overhead. If TLS is used, the initial handshake adds several kilobytes. With this lesson's FastAPI server, the ESP32's request headers are about 200 bytes and the answer about 160: the bench's 350.
+
+The count is not quite fair: CoAP's 30 include the 8-byte UDP header, but MQTT's and HTTP's figures leave out the TCP header (20 bytes or more) on each packet, and TCP's own acknowledgement packets. Counted the same way, MQTT adds about 53 bytes, not 33. (All three also carry a 20-byte IP header.)
 
 **RTT (round-trip time):** The time from starting the send to receiving confirmation:
 - **MQTT QoS 0:** The `publish()` call returns as soon as the data is written to the TCP buffer. This is not a true round-trip; it measures only the local write time. For QoS 1, the broker sends a PUBACK, giving a true RTT.
@@ -1117,6 +1129,8 @@ For a battery-powered device that wakes up, reads a sensor, sends data, and goes
 - **CoAP** wins if the device sleeps for minutes between readings (no connection overhead on wake)
 - **MQTT** wins if the device stays awake and sends frequently (amortized connection cost)
 - **HTTP** is rarely the best choice for battery-powered devices
+
+These rules hold where every byte costs radio time or money (cellular, NB-IoT, LoRa). On Wi-Fi, an ESP32 waking from deep sleep needs about 1 to 3 seconds at around 100 mA to join the network, against a few milliseconds for a TCP handshake on a local network. So for a sleeping Wi-Fi node the number of wakes decides the battery life, not the protocol. An MQTT connection kept open also keeps the radio joined, which costs far more than its pings.
 
 ### Running a Proper Benchmark
 
@@ -1255,12 +1269,14 @@ For production systems, include diagnostic fields:
 
 The `wifi_rssi` field helps you detect connectivity degradation before messages start failing. The `free_heap` field catches memory leaks in long-running firmware. The `firmware_version` field lets your backend handle schema differences across firmware updates.
 
+Watch the size when you add fields. PubSubClient keeps each packet in a buffer of 256 bytes by default. The extended payload is 207 bytes, so with the bench topic the packet is 240 bytes: it fits, but two more fields do not, and then `publish()` returns false and nothing is sent. Call `mqttClient.setBufferSize(512)` before you connect, and always log the return value of `publish()`.
+
 ## SiliconWit.io: Connected Operations Platform
 
 <InArticleAd />
 
 
-[SiliconWit.io](https://siliconwit.io) is a connected operations platform that provides real-time monitoring, dashboards, alerts (email, SMS, Discord, Slack, Telegram), remote device control, automation rules, AI analytics, and a REST API. It accepts data over all three protocols covered in this lesson: MQTT, CoAP, and HTTP. This makes it a convenient target for protocol comparison benchmarks and a practical option for production deployments.
+[SiliconWit.io](https://siliconwit.io) is a connected operations platform that provides real-time monitoring, dashboards, alerts (email, SMS, Slack, Discord, webhooks), remote device control, automation rules, AI analytics, and a REST API. It accepts data over all three protocols of this lesson: MQTT, CoAP, and HTTP.
 
 ### Connection Summary
 
@@ -1274,7 +1290,7 @@ Connection details, certificates, and API keys are available after registration 
 
 ### Why Multiple Protocols Matter
 
-A real IoT deployment often has mixed device types. Your ESP32 with Wi-Fi might use MQTT for real-time telemetry. A constrained LoRa sensor behind a gateway might forward data via CoAP. A third-party integration or mobile app might push data via HTTP REST. A platform that supports all three lets you unify data from diverse sources into a single dashboard and alert pipeline.
+A real deployment often mixes devices: a Wi-Fi ESP32 sends MQTT, a LoRa sensor's gateway forwards CoAP, and a mobile app or another service pushes HTTP. A platform that accepts all three puts their data in one set of dashboards and alerts.
 
 ## When to Choose Each Protocol
 
@@ -1337,7 +1353,8 @@ mosquitto_pub -t "test/hello" -m "world"
 ```bash title="Terminal"
 brew install mosquitto
 
-# Start Mosquitto with default config
+# Add "listener 1883" and "allow_anonymous true" to this file first,
+# or Mosquitto 2 accepts connections from this computer only
 mosquitto -c /opt/homebrew/etc/mosquitto/mosquitto.conf -v
 
 # Or run in background
@@ -1388,10 +1405,11 @@ mosquitto_pub -h localhost -t "test/hello" -m "world"
 <Steps>
 1. **Start the three servers on your development machine.** Open three terminal windows:
 
-   Terminal 1 (MQTT broker):
+   Terminal 1 (MQTT broker), with the two-line test configuration from the setup above (`listener 1883` and `allow_anonymous true`) saved as `local.conf`:
    ```bash
-   mosquitto -v
+   mosquitto -c local.conf -v
    ```
+   With no configuration file, Mosquitto 2 starts in "local only mode" and refuses the ESP32. If the Linux `mosquitto` service is already running, skip this terminal (a second broker stops with "Address already in use").
 
    Terminal 2 (CoAP server):
    ```bash
@@ -1435,6 +1453,14 @@ After running 100 iterations on a local network (ESP32 on the same Wi-Fi as the 
 | Connection setup | 0 ms (reused) | 0 ms (UDP) | 5-10 ms (TCP) |
 | TLS addition | 0 ms (done once) | Per session | Per request |
 
+### Check it
+
+A table of numbers is a result only when you know it is right.
+
+1. **The payload.** The CoAP server's "Payload size" and the HTTP server's "Content-Length" must equal the Payload column, about 120 bytes (one more each time `timestamp_ms` gains a digit).
+2. **The bytes on the wire.** Run `sudo tcpdump -i any -nn udp port 5683` on the development machine. A 121-byte reading shows `UDP, length 143`: 22 bytes of CoAP, plus 8 of UDP, is the table's 30. `sudo tcpdump -i any -nn tcp port 1883` shows the MQTT publish as `length 154`, the reading plus 33.
+3. **The status.** Give `coap_sender.ino` a `COAP_PATH` the server does not have: it must print TIMEOUT (the server answers 4.04). Stop the HTTP server: `http_sender.ino` must print a negative code and the bench FAIL. A broken path that still prints OK means the program checks the wrong thing.
+
 ## Exercises
 
 <InArticleAd />
@@ -1454,7 +1480,7 @@ After running 100 iterations on a local network (ESP32 on the same Wi-Fi as the 
 
 
 - An IoT network has one of four shapes: star, mesh, gateway or edge. In all of them, fast control and safety limits stay in the device.
-- The same 120-byte reading cost about 33 extra bytes with MQTT, 30 with CoAP and 350 with HTTP.
+- The same 120-byte reading cost about 33 extra bytes with MQTT, 30 with CoAP and 350 with HTTP; the TCP header adds about 20 more to each MQTT and HTTP packet. On Wi-Fi, joining the network costs more energy than any of these.
 - MQTT suits a device that stays connected and sends often. CoAP suits a very small device that sleeps between readings. HTTP suits rare uploads to a web service.
 - A send that returns OK is not proof of arrival. MQTT at QoS 0 confirms nothing. A CoAP ACK and an HTTP status code confirm that the server received the message.
 - A topic goes from general to specific (`site/building/floor/room/device/measurement`), and every device uses the same JSON field names with the unit in the name.

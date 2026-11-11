@@ -140,17 +140,17 @@ Placement decides whether the readings are real. Put a capacitive soil moisture 
 A clear topic plan makes the access rules simple. Every sensor node publishes under `greenhouse/<node-id>/`. Each status topic is retained (the broker keeps the last message for new subscribers) and has a last will (a message the broker publishes for a node that disappears).
 
 ```
-greenhouse/esp32-node/temperature     "23.5"        (Celsius, QoS 1, retained)
-greenhouse/esp32-node/humidity        "61.2"        (percent, QoS 1, retained)
-greenhouse/esp32-node/pressure        "1013.2"      (hPa, QoS 1, retained)
-greenhouse/esp32-node/soil_moisture   "42"          (percent, QoS 1, retained)
+greenhouse/esp32-node/temperature     "23.5"        (Celsius, QoS 1)
+greenhouse/esp32-node/humidity        "61.2"        (percent, QoS 1)
+greenhouse/esp32-node/pressure        "1013.2"      (hPa, QoS 1)
+greenhouse/esp32-node/soil_moisture   "42"          (percent, QoS 1)
 greenhouse/esp32-node/status          "online"      (retained, last will: "offline")
 
-greenhouse/pico-node/light            "780"         (lux, QoS 1, retained)
+greenhouse/pico-node/light            "780"         (lux, QoS 1)
 greenhouse/pico-node/motion           "1"           (1=detected, 0=clear, QoS 1)
 greenhouse/pico-node/status           "online"      (retained, last will: "offline")
 
-greenhouse/stm32-node/air_quality     "127"         (AQI 0-500, QoS 1, retained)
+greenhouse/stm32-node/air_quality     "127"         (scaled 0-500, QoS 1)
 greenhouse/stm32-node/status          "online"      (retained, last will: "offline")
 
 greenhouse/cmd/[node-id]              (commands from API)
@@ -158,7 +158,7 @@ greenhouse/cmd/[node-id]              (commands from API)
 
 **Design decisions:**
 
-- **Retained messages** on all sensor topics so that any new subscriber (Telegraf restarting, a new dashboard panel) immediately gets the last known value. That value can be hours old. Read the status topic before you trust it.
+- **Retained status, not retained readings.** Only the status topics are retained. A retained reading goes to every new subscriber, and Telegraf subscribes anew at each restart: it would store an hours-old value with the current time, and a dead node would look alive on the status panel.
 - **QoS 1** for all publishes. QoS 0 risks silent data loss; QoS 2 adds round trips without meaningful benefit for sensor data where occasional duplicates are harmless.
 - **Per-node prefixes** make ACLs simple: each device credential is allowed to publish only under its own prefix.
 - **Command topics** use `greenhouse/cmd/<node-id>` so the REST API can dispatch configuration changes to specific nodes.
@@ -198,13 +198,17 @@ log_type all
 connection siliconwit-bridge
 address mqtt.siliconwit.io:8883
 bridge_cafile /mosquitto/certs/siliconwit-ca.crt
-remote_username YOUR_SILICONWIT_USERNAME
+remote_username YOUR_DEVICE_ID
 remote_password YOUR_SILICONWIT_TOKEN
-topic greenhouse/# out 1
+# SiliconWit.io takes telemetry as JSON on d/<device id>/t, one device
+# per login. Each node publishes a JSON summary on its own topic, and
+# each node has its own connection block. This one is the ESP32 node:
+topic "" out 1 greenhouse/esp32-node/json d/YOUR_DEVICE_ID/t
 bridge_protocol_version mqttv311
 bridge_insecure false
 start_type automatic
 notifications true
+notifications_local_only true
 notification_topic greenhouse/bridge/status
 ```
 
@@ -318,9 +322,9 @@ Most of the long listing reads the BME280. The parts to study are `buffer_readin
 #define TOPIC_CMD        "greenhouse/cmd/esp32-node"
 
 /* State */
-static bool mqtt_connected = false;
+static volatile bool mqtt_connected = false;
+static volatile bool flush_pending = false;  /* set on connect, done by the sensor task */
 static esp_mqtt_client_handle_t mqtt_client = NULL;
-static int backoff_ms = 1000;
 
 /* Offline buffer */
 typedef struct {
@@ -334,7 +338,46 @@ static sensor_reading_t offline_buffer[OFFLINE_BUFFER_SIZE];
 static int buffer_head = 0;
 static int buffer_count = 0;
 
-/* ── BME280 driver (simplified, register-level) ── */
+/* ── BME280 driver (register-level) ── */
+
+/* Factory calibration, read once. Without it the raw counts cannot be
+ * turned into degrees, percent or pascals. */
+static uint16_t dig_T1, dig_P1;
+static int16_t  dig_T2, dig_T3, dig_P2, dig_P3, dig_P4, dig_P5,
+                dig_P6, dig_P7, dig_P8, dig_P9, dig_H2, dig_H4, dig_H5;
+static uint8_t  dig_H1, dig_H3;
+static int8_t   dig_H6;
+
+static esp_err_t bme280_read_regs(uint8_t reg, uint8_t *buf, size_t len)
+{
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (BME280_ADDR << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(cmd, reg, true);
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (BME280_ADDR << 1) | I2C_MASTER_READ, true);
+    i2c_master_read(cmd, buf, len, I2C_MASTER_LAST_NACK);
+    i2c_master_stop(cmd);
+    esp_err_t ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, pdMS_TO_TICKS(100));
+    i2c_cmd_link_delete(cmd);
+    return ret;
+}
+
+static void bme280_parse_calib(const uint8_t *c, const uint8_t *h)
+{
+    /* c: 26 bytes from 0x88, h: 7 bytes from 0xE1 (datasheet 4.2.2) */
+    dig_T1 = c[0] | c[1] << 8;              dig_T2 = (int16_t)(c[2] | c[3] << 8);
+    dig_T3 = (int16_t)(c[4] | c[5] << 8);   dig_P1 = c[6] | c[7] << 8;
+    dig_P2 = (int16_t)(c[8] | c[9] << 8);   dig_P3 = (int16_t)(c[10] | c[11] << 8);
+    dig_P4 = (int16_t)(c[12] | c[13] << 8); dig_P5 = (int16_t)(c[14] | c[15] << 8);
+    dig_P6 = (int16_t)(c[16] | c[17] << 8); dig_P7 = (int16_t)(c[18] | c[19] << 8);
+    dig_P8 = (int16_t)(c[20] | c[21] << 8); dig_P9 = (int16_t)(c[22] | c[23] << 8);
+    dig_H1 = c[25];
+    dig_H2 = (int16_t)(h[0] | h[1] << 8);   dig_H3 = h[2];
+    dig_H4 = (int16_t)((int8_t)h[3] * 16 | (h[4] & 0x0F));
+    dig_H5 = (int16_t)((int8_t)h[5] * 16 | (h[4] >> 4));
+    dig_H6 = (int8_t)h[6];
+}
 
 static esp_err_t bme280_init(void)
 {
@@ -371,7 +414,12 @@ static esp_err_t bme280_init(void)
     i2c_master_stop(cmd);
     ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, pdMS_TO_TICKS(100));
     i2c_cmd_link_delete(cmd);
+    if (ret != ESP_OK) return ret;
 
+    uint8_t c[26], h[7];
+    ret = bme280_read_regs(0x88, c, sizeof(c));
+    if (ret == ESP_OK) ret = bme280_read_regs(0xE1, h, sizeof(h));
+    if (ret == ESP_OK) bme280_parse_calib(c, h);
     return ret;
 }
 
@@ -391,15 +439,34 @@ static esp_err_t bme280_read(float *temp, float *hum, float *press)
     i2c_cmd_link_delete(cmd);
     if (ret != ESP_OK) return ret;
 
-    /* Simplified compensation (use full Bosch algorithm in production) */
     int32_t adc_t = ((int32_t)data[3] << 12) | ((int32_t)data[4] << 4) | (data[5] >> 4);
     int32_t adc_p = ((int32_t)data[0] << 12) | ((int32_t)data[1] << 4) | (data[2] >> 4);
     int32_t adc_h = ((int32_t)data[6] << 8) | data[7];
 
-    /* Placeholder compensation (replace with calibration data in production) */
-    *temp  = (float)adc_t / 16384.0f - 20.0f;
-    *press = (float)adc_p / 256.0f;
-    *hum   = (float)adc_h / 512.0f;
+    /* Bosch compensation formulas (BME280 datasheet 8.1, double version) */
+    double v1 = (adc_t / 16384.0 - dig_T1 / 1024.0) * dig_T2;
+    double v2 = (adc_t / 131072.0 - dig_T1 / 8192.0);
+    v2 = v2 * v2 * dig_T3;
+    double t_fine = v1 + v2;
+    *temp = (float)(t_fine / 5120.0);
+
+    v1 = t_fine / 2.0 - 64000.0;
+    v2 = v1 * v1 * dig_P6 / 32768.0 + v1 * dig_P5 * 2.0;
+    v2 = v2 / 4.0 + dig_P4 * 65536.0;
+    v1 = (dig_P3 * v1 * v1 / 524288.0 + dig_P2 * v1) / 524288.0;
+    v1 = (1.0 + v1 / 32768.0) * dig_P1;
+    if (v1 == 0.0) return ESP_FAIL;       /* avoid dividing by zero */
+    double p = 1048576.0 - adc_p;
+    p = (p - v2 / 4096.0) * 6250.0 / v1;
+    p += (dig_P9 * p * p / 2147483648.0 + p * dig_P8 / 32768.0 + dig_P7) / 16.0;
+    *press = (float)(p / 100.0);          /* Pa to hPa */
+
+    double hh = t_fine - 76800.0;
+    hh = (adc_h - (dig_H4 * 64.0 + dig_H5 / 16384.0 * hh)) *
+         (dig_H2 / 65536.0 * (1.0 + dig_H6 / 67108864.0 * hh *
+                              (1.0 + dig_H3 / 67108864.0 * hh)));
+    hh = hh * (1.0 - dig_H1 * hh / 524288.0);
+    *hum = (float)(hh < 0.0 ? 0.0 : (hh > 100.0 ? 100.0 : hh));
 
     return ESP_OK;
 }
@@ -441,13 +508,13 @@ static void flush_buffer(esp_mqtt_client_handle_t client)
         int idx = (start + i) % OFFLINE_BUFFER_SIZE;
         char val[16];
         snprintf(val, sizeof(val), "%.1f", offline_buffer[idx].temperature);
-        esp_mqtt_client_publish(client, TOPIC_TEMP, val, 0, 1, 1);
+        esp_mqtt_client_publish(client, TOPIC_TEMP, val, 0, 1, 0);
         snprintf(val, sizeof(val), "%.1f", offline_buffer[idx].humidity);
-        esp_mqtt_client_publish(client, TOPIC_HUMIDITY, val, 0, 1, 1);
+        esp_mqtt_client_publish(client, TOPIC_HUMIDITY, val, 0, 1, 0);
         snprintf(val, sizeof(val), "%.1f", offline_buffer[idx].pressure);
-        esp_mqtt_client_publish(client, TOPIC_PRESSURE, val, 0, 1, 1);
+        esp_mqtt_client_publish(client, TOPIC_PRESSURE, val, 0, 1, 0);
         snprintf(val, sizeof(val), "%d", offline_buffer[idx].soil_pct);
-        esp_mqtt_client_publish(client, TOPIC_SOIL, val, 0, 1, 1);
+        esp_mqtt_client_publish(client, TOPIC_SOIL, val, 0, 1, 0);
         vTaskDelay(pdMS_TO_TICKS(50));  /* Brief delay to avoid flooding */
     }
     buffer_count = 0;
@@ -465,23 +532,23 @@ static void mqtt_event_handler(void *args, esp_event_base_t base,
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(TAG, "MQTT connected");
         mqtt_connected = true;
-        backoff_ms = 1000;  /* Reset backoff */
         /* Publish online status */
         esp_mqtt_client_publish(event->client, TOPIC_STATUS, "online", 0, 1, 1);
         /* Subscribe to command topic */
         esp_mqtt_client_subscribe(event->client, TOPIC_CMD, 1);
-        /* Flush any buffered readings */
-        flush_buffer(event->client);
+        /* Buffered readings are sent by the sensor task, not here: this
+         * handler runs in the MQTT task, and 60 readings with pauses
+         * would hold it for seconds */
+        flush_pending = true;
         break;
 
     case MQTT_EVENT_DISCONNECTED:
-        ESP_LOGW(TAG, "MQTT disconnected, backoff %d ms", backoff_ms);
+        ESP_LOGW(TAG, "MQTT disconnected");
         mqtt_connected = false;
-        vTaskDelay(pdMS_TO_TICKS(backoff_ms));
-        backoff_ms *= 2;
-        if (backoff_ms > MAX_BACKOFF_MS) {
-            backoff_ms = MAX_BACKOFF_MS;
-        }
+        /* No wait here: a delay in this handler stops the MQTT task.
+         * The client tries again by itself every reconnect_timeout_ms
+         * (10 s by default); growing waits as in the clients lesson
+         * suit a large fleet. */
         break;
 
     case MQTT_EVENT_DATA:
@@ -509,16 +576,20 @@ static void sensor_publish_task(void *pvParameters)
         if (bme280_read(&temp, &hum, &press) == ESP_OK) {
             soil_pct = read_soil_moisture_pct();
 
+            if (mqtt_connected && flush_pending) {
+                flush_pending = false;
+                flush_buffer(mqtt_client);  /* oldest first, before the new one */
+            }
             if (mqtt_connected) {
                 char val[16];
                 snprintf(val, sizeof(val), "%.1f", temp);
-                esp_mqtt_client_publish(mqtt_client, TOPIC_TEMP, val, 0, 1, 1);
+                esp_mqtt_client_publish(mqtt_client, TOPIC_TEMP, val, 0, 1, 0);
                 snprintf(val, sizeof(val), "%.1f", hum);
-                esp_mqtt_client_publish(mqtt_client, TOPIC_HUMIDITY, val, 0, 1, 1);
+                esp_mqtt_client_publish(mqtt_client, TOPIC_HUMIDITY, val, 0, 1, 0);
                 snprintf(val, sizeof(val), "%.1f", press);
-                esp_mqtt_client_publish(mqtt_client, TOPIC_PRESSURE, val, 0, 1, 1);
+                esp_mqtt_client_publish(mqtt_client, TOPIC_PRESSURE, val, 0, 1, 0);
                 snprintf(val, sizeof(val), "%d", soil_pct);
-                esp_mqtt_client_publish(mqtt_client, TOPIC_SOIL, val, 0, 1, 1);
+                esp_mqtt_client_publish(mqtt_client, TOPIC_SOIL, val, 0, 1, 0);
                 ESP_LOGI(TAG, "Published: T=%.1f H=%.1f P=%.1f Soil=%d%%",
                          temp, hum, press, soil_pct);
             } else {
@@ -575,11 +646,11 @@ void app_main(void)
 ```
 
 **Patterns to notice:**
-- A longer wait after each failed connection (1s, 2s, 4s, ... up to 60s)
+- No wait inside the MQTT event handler: the client retries every 10 seconds by itself, and the buffered readings are sent by the sensor task
 - A ring buffer of 60 readings, which is 30 minutes at one reading every 30 seconds. In a longer outage the oldest readings are overwritten, and a restart empties the buffer because it is in RAM
 - Buffer flush on reconnection, with a small delay between publishes. A payload is only a number, so the database stores a flushed reading with the time it arrived, not the time it was measured
 - Last will message set to "offline" so the broker notifies all subscribers if the node vanishes
-- Retained messages on all sensor topics so new subscribers get immediate data
+- Real compensation of the BME280: the chip gives raw counts, and only its factory calibration (read at start) turns them into °C, %RH and hPa. With the datasheet's example values the code gives 25.08 °C and 1006.53 hPa, as the datasheet does
 
 ### Pico W Node (Light + PIR Motion)
 
@@ -651,8 +722,13 @@ def on_message(topic, msg):
         cmd = json.loads(msg)
         if "interval" in cmd:
             global PUBLISH_INTERVAL
-            PUBLISH_INTERVAL = int(cmd["interval"])
-            print("Publish interval changed to", PUBLISH_INTERVAL)
+            value = cmd["interval"]
+            # A command is a request: 0 would publish ten times a second
+            if isinstance(value, int) and 5 <= value <= 3600:
+                PUBLISH_INTERVAL = value
+                print("Publish interval changed to", PUBLISH_INTERVAL)
+            else:
+                print("Refused interval:", value)
     except Exception as e:
         print("Command parse error:", e)
 
@@ -686,11 +762,13 @@ def mqtt_connect():
 def main():
     global last_motion
 
-    if not connect_wifi():
-        return
+    # Never give up: a router that is off at power-on comes back later
+    while not connect_wifi():
+        time.sleep(10)
 
     client = None
     last_publish = 0
+    last_ping = 0
 
     while True:
         # Reconnect if needed
@@ -707,7 +785,7 @@ def main():
             now = time.time()
             if now - last_publish >= PUBLISH_INTERVAL:
                 lux = read_light_lux()
-                client.publish(TOPIC_LIGHT, str(lux).encode(), retain=True, qos=1)
+                client.publish(TOPIC_LIGHT, str(lux).encode(), retain=False, qos=1)
                 print("Published light:", lux, "lux")
                 last_publish = now
 
@@ -719,11 +797,20 @@ def main():
                 print("Motion event:", "detected" if current_motion else "clear")
                 last_motion = current_motion
 
+            # umqtt.simple sends no keepalive pings by itself: without this,
+            # an interval above 45 s (1.5 x keepalive) gets the node dropped
+            # and its last will "offline" published at every cycle
+            if now - last_ping >= 15:
+                client.ping()
+                last_ping = now
+
             time.sleep(0.1)  # Small poll interval for responsive motion detection
 
         except Exception as e:
             print("MQTT error:", e)
             client = None  # Force reconnect on next loop
+            while not connect_wifi():  # rejoin Wi-Fi first if it was lost
+                time.sleep(10)
 
 main()
 ```
@@ -731,6 +818,8 @@ main()
 ### STM32 Node (Air Quality via ESP-01)
 
 The STM32 reads an MQ-135 air quality sensor on its ADC and sends MQTT publishes through an ESP-01 module connected over UART. This uses AT commands to control the ESP-01 (the same pattern from the [STM32 course](/education/embedded-programming-stm32/)). The firmware is written for STM32 HAL.
+
+Three cautions. The value is the raw ADC reading scaled to 0 to 500, not an air quality index (AQI): an index comes from gas concentrations, and an MQ-135 needs a burn-in of a day or more and a calibration in clean air first, so treat it as a trend. Most MQ-135 boards run at 5 V and their output can pass 3.3 V: put a divider (10 kΩ over 20 kΩ) before PA0. And the `AT+MQTT...` commands need ESP-AT 2.x firmware, which needs more flash than many ESP-01 modules have; its scheme 2 encrypts without checking the broker's certificate.
 
 ```c title="stm32_node/Core/Src/main.c (key sections)"
 /* ── Includes and defines ── */
@@ -860,7 +949,7 @@ int main(void)
         int aqi = read_air_quality();
         char payload[8];
         snprintf(payload, sizeof(payload), "%d", aqi);
-        esp_mqtt_publish(TOPIC_AQ, payload, 1, 1);
+        esp_mqtt_publish(TOPIC_AQ, payload, 1, 0);  /* not retained */
 
         HAL_Delay(PUBLISH_INTERVAL_MS);
     }
@@ -1035,6 +1124,7 @@ The Flask API lets other programs use the system. It queries InfluxDB for histor
 
 ```python title="api/app.py"
 import os
+import re
 import json
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, abort
@@ -1112,6 +1202,11 @@ def get_device_data(node_id):
 
     time_range = request.args.get("range", "1h")
     aggregate = request.args.get("aggregate", "1m")
+    # Both go into the Flux text below: accept only a number and a unit,
+    # or a caller could add Flux of their own
+    for value in (time_range, aggregate):
+        if not re.fullmatch(r"[1-9][0-9]{0,3}[smhd]", value):
+            abort(400, description="range and aggregate look like 30m, 6h or 7d")
 
     query = f'''
     from(bucket: "{INFLUX_BUCKET}")
@@ -1353,7 +1448,7 @@ The services find each other by name on one shared Docker network:
     nodered  ──► mosquitto (ssl://mosquitto)
 ```
 
-In the file below, notice three things for each service: `restart: unless-stopped` starts it again after a crash, `healthcheck` tests that it really answers, and `depends_on` makes it wait for the services it needs.
+In the file below, notice three things for each service: `restart: unless-stopped` starts it again after a crash, `healthcheck` tests that it really answers, and `depends_on` makes it wait for the services it needs. The Mosquitto health check connects to `localhost`, so the broker certificate must list `DNS:localhost` in its SAN (the security lesson's does); otherwise the broker stays "unhealthy" and Telegraf never starts.
 
 ```yaml title="docker-compose.yml"
 version: "3.8"
@@ -1640,6 +1735,8 @@ paho-mqtt>=2.0.0
 
 ## Failure Testing
 
+**First, check that the numbers are true.** Beside a thermometer for ten minutes, the BME280 should agree within about 1 °C. Its pressure must be within a few hPa of a nearby weather station's (sea-level figures are about 12 hPa higher per 100 m of height). The soil probe must read near 100 % in water and near 0 % in air; if not, set `SOIL_WET_VALUE` and `SOIL_DRY_VALUE` from the raw readings. Then restart Telegraf while one node is off: that node must not reappear on the status panel.
+
 <InArticleAd />
 
 
@@ -1666,7 +1763,7 @@ docker compose restart mosquitto
 ```
 
 **Expected behavior:**
-- All three sensor nodes detect the TCP connection drop and enter their reconnection loops with exponential backoff.
+- All three sensor nodes detect the TCP connection drop and try again: the ESP32 every 10 seconds, the Pico W with growing waits, the STM32 through the ESP-AT automatic reconnection.
 - The broker comes back up within a few seconds.
 - Nodes reconnect, re-publish their "online" status, and resume publishing sensor data.
 - Telegraf also reconnects and resumes writing to InfluxDB.
@@ -1701,15 +1798,15 @@ Disconnect the broker host from the internet (unplug the Ethernet cable or disab
 <InArticleAd />
 
 
-The MQTT bridge in `mosquitto.conf` forwards every message under `greenhouse/#` to SiliconWit.io. The copy is live, and it gives you five things:
+The MQTT bridge in `mosquitto.conf` forwards each node's JSON summary to SiliconWit.io as it is published. That live copy gives you five things:
 
-- **A view from another place.** Check the greenhouse from a phone or any browser by logging into [siliconwit.io](https://siliconwit.io). No VPN, no port forwarding, no dynamic DNS.
-- **A second view.** If the local Grafana cannot be reached (power cut, network fault, server crash), SiliconWit.io still has the latest data, so you know the last state of every sensor.
-- **An alert from outside.** SiliconWit.io has its own alert system. When the local host is down, Node-RED sends nothing, and a rule on SiliconWit.io can still notice the silence and tell you.
+- **A view from another place.** Log into [siliconwit.io](https://siliconwit.io) from a phone or any browser. No VPN, no port forwarding, no dynamic DNS.
+- **A second view.** If the local Grafana cannot be reached (power cut, network fault, server crash), SiliconWit.io still has the last state of every sensor.
+- **An alert from outside.** When the local host is down, Node-RED sends nothing, and a rule on SiliconWit.io can still notice the silence and tell you.
 - **Sharing.** Give a colleague, an agronomist or a client read access on SiliconWit.io without opening your local network.
 - **A longer history.** SiliconWit.io keeps data according to your plan, so you can compare this week with last month after the local InfluxDB has deleted the older data.
 
-In the bridge, `topic greenhouse/# out 1` means: forward all messages that match `greenhouse/#`, outward only, with QoS 1. The bridge uses TLS and your SiliconWit.io credentials, and Mosquitto reconnects it after a drop.
+In the bridge, `topic "" out 1 greenhouse/esp32-node/json d/YOUR_DEVICE_ID/t` forwards one local topic, outward only, with QoS 1, to the device's telemetry topic on SiliconWit.io. A plain `topic greenhouse/# out 1` would send the readings under local names that the platform does not take as telemetry, one bare number each. So add to each node one JSON summary publish, such as `{"temperature":23.5,"humidity":61.2,"pressure":1013.2,"soil_moisture":42}` on `greenhouse/esp32-node/json` (its ACL allows it; Telegraf skips it as not a number), and give each node its own device and `connection` block, as the broker lesson shows. The failure tests below assume this is done.
 
 ## Production Hardening
 
@@ -1761,11 +1858,11 @@ find /backups/influxdb -maxdepth 1 -mtime +7 -type d -exec rm -rf {} \;
 
 ### Monitoring the Monitor
 
-Your monitoring system itself needs monitoring. If InfluxDB crashes or Grafana becomes unresponsive, who alerts you?
+If InfluxDB crashes or Grafana stops answering, who alerts you? The monitoring system needs a watcher of its own.
 
-**Approach 1: External uptime checks.** Use an external service (UptimeRobot, Healthchecks.io, or a simple cron job on another machine) that pings your Flask API's `/api/health` endpoint every minute. If it fails to respond, you receive an email or SMS.
+**Approach 1: External uptime checks.** A service such as UptimeRobot or Healthchecks.io, or a cron job on another machine, calls the Flask API's `/api/health` every minute and sends an email or SMS when it gets no answer.
 
-**Approach 2: SiliconWit.io as the watchdog.** Since data is forwarded to SiliconWit.io, configure a SiliconWit.io inactivity alert: if no data arrives from the bridge for 10 minutes, something is wrong with your local infrastructure. This uses the cloud layer as a health check for the local stack.
+**Approach 2: SiliconWit.io as the watchdog.** An inactivity alert on SiliconWit.io (no data from the bridge for 10 minutes) tells you that something in the local system is wrong.
 
 ```bash title="Simple cron-based health check"
 # Add to crontab on a separate machine
@@ -1792,7 +1889,7 @@ The system as described handles three sensor nodes comfortably. What changes at 
 
 ### 100 Nodes
 
-At 100 nodes publishing every 30 seconds, the broker handles roughly 200 messages per minute. Mosquitto on a Raspberry Pi 4 can sustain this without difficulty. The main concern is InfluxDB write throughput and storage.
+At 100 nodes publishing every 30 seconds, the broker handles about 400 messages per minute (two topics per node on average in this plan: four on an ESP32 node, one on the others). Mosquitto on a Raspberry Pi 4 can sustain this without difficulty. The main concern is InfluxDB write throughput and storage.
 
 **Changes needed:**
 - Increase InfluxDB `write-buffer-size` in the configuration.
@@ -1819,7 +1916,7 @@ At 1,000 nodes, the single Mosquitto instance may become a bottleneck. MQTT brid
 | Broker | Raspberry Pi (free) | Single VM (10 USD a month) | 3-node cluster (90 USD a month) |
 | InfluxDB | Same Pi | Dedicated VM (20 USD a month) | InfluxDB Cloud (100 USD a month or more) |
 | Grafana | Same Pi | Same VM | Grafana Cloud (50 USD a month) |
-| SiliconWit.io | Free tier | Growth plan | Enterprise plan |
+| SiliconWit.io | Free tier | Paid plan, billed per device | Enterprise plan |
 | Total infra | about 0 USD a month | about 30 USD a month | 240 USD a month or more |
 
 These are rough estimates. The same topic plan, Telegraf pipeline and Grafana queries work at each scale, with changes of configuration and no rewrite.
