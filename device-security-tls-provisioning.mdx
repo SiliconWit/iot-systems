@@ -1143,12 +1143,12 @@ void check_certificate_expiry(void)
 
 The device proves itself in the renewal request with its current certificate, which must still be valid. The provisioning server checks it, signs the new CSR, and returns the new certificate. A device that stays switched off past the expiry date cannot renew by itself and must be provisioned again.
 
-## SiliconWit.io Security Model
+## Token-Based Authentication: The SiliconWit.io Example
 
 <InArticleAd />
 
 
-The [SiliconWit.io](https://siliconwit.io) platform uses TLS on port 8883 for all MQTT connections. Each device authenticates with a `device_id` and `access_token` pair, which is simpler to set up than per-device certificates.
+Your own Mosquitto with passwords, from the [broker lesson](/education/iot-systems/mqtt-broker-setup-secure-connection/), works this way: one shared secret for each device. [SiliconWit.io](https://siliconwit.io), our monitoring service, is a hosted example: it uses TLS on port 8883 for all MQTT connections. Each device authenticates with a `device_id` and `access_token` pair, which is simpler to set up than per-device certificates.
 
 ```text title="SiliconWit.io connection parameters"
 Host:       mqtt.siliconwit.io
@@ -1170,7 +1170,7 @@ For production at scale (thousands of devices), mutual TLS with per-device certi
 | Identity assurance | Token proves knowledge of a secret | Certificate proves possession of a private key, verified by CA chain |
 | Scalability | Simple, no PKI infrastructure needed | Requires CA management, provisioning workflow |
 
-For many IoT projects, starting with token-based authentication on SiliconWit.io and migrating to mTLS as the deployment grows is a practical approach.
+For many IoT projects, starting with token-based authentication (passwords on your own broker, or tokens on a hosted one such as SiliconWit.io) and migrating to mTLS as the deployment grows is a practical approach.
 
 ## Secure Firmware Updates
 

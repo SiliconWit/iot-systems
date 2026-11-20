@@ -1,6 +1,6 @@
 ---
 title: "MQTT Broker Setup and Secure Connections"
-description: "Install and configure a Mosquitto MQTT broker with TLS encryption, password authentication, and topic ACLs. Connect to both a self-hosted broker and the SiliconWit.io platform. Understand retained messages, last will, QoS levels, and persistence."
+description: "Install and configure a Mosquitto MQTT broker with TLS encryption, password authentication, and topic ACLs. Bridge selected topics to a remote broker. Understand retained messages, last will, QoS levels, and persistence."
 contributors: "sam-macharia,lawrence-langat,john-kibe"
 pubDate: 2026-03-10
 tags: ["mqtt", "mosquitto", "tls", "iot", "broker", "security", "acl", "docker", "siliconwit-io"]
@@ -25,12 +25,12 @@ import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/sta
 
 import IoTSystemsComments from '../../../../components/iot-systems/IoTSystemsComments.astro';
 
-Automatic scanners search the internet for brokers that accept anyone, and they find a new one quickly. A stranger can then read every sensor, publish false readings, and send commands to your devices. A password alone does not stop this: on a plain connection the password travels as readable text, and one stolen device can still write to every topic. In this lesson you build a Mosquitto broker on Linux and close each of these doors in turn: passwords, a list of which user may use which topic, and TLS encryption. Then you forward selected data to the SiliconWit.io platform. #MQTT #Mosquitto #TLS
+Automatic scanners search the internet for brokers that accept anyone, and they find a new one quickly. A stranger can then read every sensor, publish false readings, and send commands to your devices. A password alone does not stop this: on a plain connection the password travels as readable text, and one stolen device can still write to every topic. In this lesson you build a Mosquitto broker on Linux and close each of these doors in turn: passwords, a list of which user may use which topic, and TLS encryption. Then you bridge selected data to a remote broker: a second one you run, or a hosted one. #MQTT #Mosquitto #TLS
 
 ## What We Are Building
 
 <Card title="Production-Ready Mosquitto Broker" icon="setting">
-A self-hosted MQTT broker on a Raspberry Pi or Linux machine with password authentication, per-user topic ACLs, TLS on port 8883, WebSocket support on port 8084, and a bridge connection that forwards selected topics to the SiliconWit.io platform. You will test every feature with the `mosquitto_pub` and `mosquitto_sub` command-line tools before connecting any MCU.
+A self-hosted MQTT broker on a Raspberry Pi or Linux machine with password authentication, per-user topic ACLs, TLS on port 8883, WebSocket support on port 8084, and a bridge connection that forwards selected topics to a remote broker. You will test every feature with the `mosquitto_pub` and `mosquitto_sub` command-line tools before connecting any MCU.
 </Card>
 
 **Infrastructure overview:**
@@ -45,7 +45,7 @@ A self-hosted MQTT broker on a Raspberry Pi or Linux machine with password authe
 | Authentication | Username/password via `mosquitto_passwd` |
 | Authorization | Per-user topic ACLs with pattern matching |
 | TLS certificates | Self-signed CA, server cert, server key (OpenSSL) |
-| Cloud bridge | Forwarding to `mqtt.siliconwit.io:8883` |
+| Cloud bridge | Forwarding over TLS to a remote broker (your own, or optionally `mqtt.siliconwit.io:8883`) |
 
 ## MQTT Fundamentals
 
@@ -694,12 +694,12 @@ mosquitto_pub -h 192.168.1.50 -p 8883 \
   -t sensors/node01/temperature -m '{"temp_c": 24.1}'
 ```
 
-## Connecting to the SiliconWit.io Platform
+## Optional: A Hosted Broker (SiliconWit.io)
 
 <InArticleAd />
 
 
-[SiliconWit.io](https://siliconwit.io) is a connected operations platform that provides real-time monitoring, dashboards, alerts (email, SMS, Slack, Discord, webhooks), remote device control, automation rules, AI analytics, and a REST API. Its MQTT endpoint lets devices publish telemetry and receive commands. When you register a device on the platform, you receive credentials and a topic structure that keeps each device isolated.
+This section is optional: every later lesson works with the broker you built above. [SiliconWit.io](https://siliconwit.io), our monitoring service, runs a hosted MQTT broker where devices publish telemetry and receive commands, and it keeps the record, the charts and the alerts. When you register a device there, you receive credentials and a topic structure that keeps each device isolated. It works with any MQTT client, so a device moves between it and your own broker when you change the host, the credentials and the topics.
 
 ### Connection Details
 
@@ -743,7 +743,7 @@ d/{device_id}/c     Commands: device subscribes here for remote commands
 d/{device_id}/s     Status: device publishes online/offline status
 ```
 
-The ACL on the SiliconWit.io platform ensures that each device can only access its own topics. Device A cannot read or write to Device B's topics.
+The ACL on the SiliconWit.io broker ensures that each device can only access its own topics. Device A cannot read or write to Device B's topics.
 
 ## WebSocket Support
 
@@ -803,11 +803,11 @@ For SiliconWit.io, the WebSocket endpoint is `wss://mqtt.siliconwit.io:8084`. Th
 <InArticleAd />
 
 
-A bridge connects two MQTT brokers so that a message published on one also appears on the other. Your local Mosquitto broker collects data from the sensors on your network and keeps working when the internet fails. The bridge forwards the topics you select to a remote platform for records, charts and alerts.
+A bridge connects two MQTT brokers so that a message published on one also appears on the other. Your local Mosquitto broker collects data from the sensors on your network and keeps working when the internet fails. The bridge forwards the topics you select to a remote broker for records, charts and alerts.
 
-### Bridge to SiliconWit.io
+### Bridge to a Remote Broker
 
-Add a bridge configuration to your Mosquitto config:
+The example below forwards to the optional hosted broker of the previous section. To bridge to a second Mosquitto that you run, change `address`, the credentials and the remote topic names (and give `bridge_cafile` your own `ca.crt`); the rest is the same. Add a bridge configuration to your Mosquitto config:
 
 ```conf title="/etc/mosquitto/conf.d/bridge.conf"
 # ── Bridge to SiliconWit.io ──
@@ -877,7 +877,7 @@ mosquitto_pub -h your-broker-hostname -p 8883 \
   -t sensors/node01/temperature -m '{"temp_c": 25.0}'
 ```
 
-Check the SiliconWit.io dashboard to confirm the telemetry data arrived.
+Subscribe to the topic on the remote broker (or open the device page on SiliconWit.io) to confirm the telemetry data arrived.
 
 ## Monitoring with $SYS Topics
 
@@ -1264,7 +1264,7 @@ A step that succeeds where it should fail is a door still open. Repeat the four 
 
 2. **Generate certificates and enable TLS.** Follow the OpenSSL steps in this lesson to generate your own CA certificate, server certificate, and server key. Configure Mosquitto to listen on port 8883 with TLS. Test the connection using `mosquitto_pub` and `mosquitto_sub` with the `--cafile` flag. Then intentionally break something (use the wrong CA file, use an expired certificate, use a mismatched hostname) and observe the error messages in both the client output and the Mosquitto log. Document each error and its cause.
 
-3. **Configure a bridge to SiliconWit.io.** Register a device on [siliconwit.io](https://siliconwit.io) and note your device ID and access token. Configure a Mosquitto bridge that forwards one local topic, `sensors/node01/temperature`, to the cloud topic `d/{device_id}/t`. Publish test messages locally and verify they appear on the SiliconWit.io dashboard. Then disconnect your internet connection for 30 seconds while continuing to publish locally. Reconnect and verify that the queued messages arrive at the cloud (this tests `cleansession false` on the bridge). Measure the delay between reconnection and message delivery.
+3. **Configure a bridge to a remote broker.** Run a second Mosquitto (on another machine, or in Docker on another port) with its own user, or, if you have one, use a device on [siliconwit.io](https://siliconwit.io) and its `d/{device_id}/t` topic. Configure a Mosquitto bridge that forwards one local topic, `sensors/node01/temperature`, to one remote topic. Publish test messages locally and verify with `mosquitto_sub` on the remote broker (or on the device page) that they arrive. Then disconnect your internet connection for 30 seconds while continuing to publish locally. Reconnect and verify that the queued messages arrive at the cloud (this tests `cleansession false` on the bridge). Measure the delay between reconnection and message delivery.
 
 4. **Deploy Mosquitto in Docker with persistence testing.** Set up the Docker deployment described in this lesson. Publish 10 retained messages to different topics. Stop the container with `docker compose down`, then start it again. Subscribe to the retained topics and verify all 10 messages survived the restart (this tests that the persistence volume mount works correctly). Then run a load test: use a bash loop to publish 1000 messages as fast as possible and check `$SYS/broker/messages/received` to confirm all 1000 arrived. Record the messages-per-second rate.
 

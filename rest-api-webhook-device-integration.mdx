@@ -832,12 +832,12 @@ In step 7 the server answered `pending`. That means the command is stored. It do
 A command over a network can be late or lost, so it must never be the only thing that stops a machine. Fast decisions and safety limits stay in the device.
 :::
 
-## SiliconWit.io REST API
+## Optional: The SiliconWit.io REST API
 
 <InArticleAd />
 
 
-If you prefer a managed IoT platform instead of running your own server, [SiliconWit.io](https://siliconwit.io) provides a REST API that handles device management, data storage, and alerting for you.
+This section is optional; the Flask API you built above is the main path of the lesson. If you would rather not run your own server, [SiliconWit.io](https://siliconwit.io), our monitoring service, has a REST API for devices, stored data and alerts.
 
 ### API Endpoints
 
@@ -875,7 +875,7 @@ start=2026-03-10T00:00:00Z&end=2026-03-10T12:00:00Z&limit=500" \
   -H "Authorization: Bearer swk_YOUR_SILICONWIT_KEY"
 ```
 
-You can use either SiliconWit.io or your own Flask API for the rest of this lesson. The concepts are identical; only the base URL changes.
+You can use your own Flask API, or SiliconWit.io if you took the optional path, for the rest of this lesson. The concepts are identical; only the base URL changes.
 
 ## Webhooks: Server Push Notifications
 
@@ -1153,12 +1153,12 @@ WARNING:webhook:Invalid signature from 127.0.0.1
 
 Flask adds one `INFO:werkzeug` line for each request, left out here. **Check it:** run `test_webhook.py` a second time. Tests 1 and 2 must now log `Repeat of alert-001 ignored` and `Repeat of alert-002 ignored` and still answer 200 (so the platform stops retrying), and test 3 must still get 401. Then change one character of `WEBHOOK_SECRET` in the test script only: every event must get 401.
 
-## SiliconWit.io Webhook Payloads
+## Webhook Payloads from a Hosted Service (SiliconWit.io)
 
 <InArticleAd />
 
 
-When you configure webhooks on SiliconWit.io, the platform sends structured JSON events. Here is the format you can expect:
+A hosted service sends its own webhook events, and your receiver must know their format. As an example, when you configure webhooks on SiliconWit.io, it sends structured JSON events like these:
 
 ```json title="Device offline event"
 {

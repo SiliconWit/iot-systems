@@ -1,10 +1,10 @@
 ---
 title: "Real-Time Dashboards and Data Visualization"
-description: "Store MQTT sensor data in InfluxDB via Telegraf, build Grafana dashboards with live charts and gauges, explore the SiliconWit.io dashboard as a managed alternative, query historical data with Flux, and create lightweight Chart.js dashboards for embedded gateways."
+description: "Store MQTT sensor data in InfluxDB via Telegraf, build Grafana dashboards with live charts and gauges, compare with a managed service such as SiliconWit.io, query historical data with Flux, and create lightweight Chart.js dashboards for embedded gateways."
 contributors: "sam-macharia,lawrence-langat,john-kibe"
 pubDate: 2026-03-10
 tags: ["iot", "grafana", "influxdb", "telegraf", "dashboard", "data-visualization", "mqtt", "time-series", "flux", "chart-js"]
-excerpt: "Build real-time IoT dashboards from scratch. Install the TIG stack (Telegraf, InfluxDB, Grafana), ingest MQTT sensor data into a time-series database, create live panels with line charts, gauges, tables, and alerts. Compare self-hosted dashboards with SiliconWit.io managed visualization, and build a lightweight Chart.js alternative for embedded Linux gateways."
+excerpt: "Build real-time IoT dashboards from scratch. Install the TIG stack (Telegraf, InfluxDB, Grafana), ingest MQTT sensor data into a time-series database, create live panels with line charts, gauges, tables, and alerts. Compare self-hosted dashboards with a managed service such as SiliconWit.io, and build a lightweight Chart.js alternative for embedded Linux gateways."
 heroImage: "https://cdn.siliconwit.com/education/iot-systems/realtime-dashboards-data-visualization.png"
 ---
 
@@ -25,7 +25,7 @@ import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/sta
 
 import IoTSystemsComments from '../../../../components/iot-systems/IoTSystemsComments.astro';
 
-A customer says the cold room was too warm last Tuesday at 3 in the morning. Your sensor measured it and published it, and you still cannot answer, because an MQTT broker passes a message on and keeps no history. Without stored readings you cannot show a trend, see a slow drift, or prove what happened. In this lesson you build the missing part with three tools, Telegraf, InfluxDB and Grafana: one collects every reading, one stores it with its time, and one draws charts that a person can read at a glance. You also compare this with the managed dashboards on SiliconWit.io and build a very small web dashboard with Chart.js. #Dashboard #Grafana #DataViz
+A customer says the cold room was too warm last Tuesday at 3 in the morning. Your sensor measured it and published it, and you still cannot answer, because an MQTT broker passes a message on and keeps no history. Without stored readings you cannot show a trend, see a slow drift, or prove what happened. In this lesson you build the missing part with three tools, Telegraf, InfluxDB and Grafana: one collects every reading, one stores it with its time, and one draws charts that a person can read at a glance. You also compare this with a managed service and build a very small web dashboard with Chart.js. #Dashboard #Grafana #DataViz
 
 ## The MQTT-to-Dashboard Pipeline
 
@@ -816,32 +816,32 @@ from(bucket: "iot_sensors")
 
 A dropdown appears at the top of the dashboard. Selecting a device filters all panels instantly. The query uses a regular expression match (`=~`) because the variable can hold several devices, or all of them, at the same time.
 
-## SiliconWit.io Dashboard Comparison
+## Comparison with a Managed Service
 
 <InArticleAd />
 
 
-The TIG stack gives you full control, but it requires a Linux server, Docker, and ongoing maintenance. For projects where you want dashboards without managing infrastructure, [SiliconWit.io](https://siliconwit.io) provides a managed alternative.
+The TIG stack gives you full control, but it requires a Linux server, Docker, and ongoing maintenance. For projects where you want dashboards without running the infrastructure, a managed service is the other path. This section uses [SiliconWit.io](https://siliconwit.io), our monitoring service, as the example; it is optional, and the rest of the course uses the TIG stack you built above.
 
 ### How SiliconWit.io Works
 
-Your MQTT clients connect to SiliconWit.io's MQTT endpoint (or your own broker with cloud forwarding configured), and the platform handles storage, visualization, and alerting automatically. There is no Telegraf or InfluxDB to install.
+Your MQTT clients connect to SiliconWit.io's MQTT endpoint (or your own broker forwards to it through a bridge), and the service stores, charts and alerts on the readings. There is no Telegraf or InfluxDB to install. It works with any MQTT client, so the same devices can go back to your own stack.
 
 | Feature | Self-Hosted TIG | SiliconWit.io |
 |---------|----------------|---------------|
-| Setup time | 30+ minutes | Under 5 minutes |
+| Setup time | 30+ minutes | A few minutes |
 | Server required | Yes (Linux machine or RPi) | No |
-| Storage | You manage InfluxDB | Managed by platform |
+| Storage | You manage InfluxDB | Managed by the service |
 | Visualization | Grafana (full customization) | Built-in live charts, tables, reports |
 | Data export | Flux queries, CSV, API | CSV download, API queries, scheduled reports |
 | Alerts | You write the Grafana alert rules | Built-in threshold alerts |
-| Cost | Free (self-hosted hardware cost) | Free tier for 3 devices |
+| Cost | Your hardware and time | A plan billed per device |
 | Customization | Unlimited | Predefined panel types |
-| Maintenance | OS updates, backups, disk space | None |
+| Maintenance | OS updates, backups, disk space | Done by the service |
 
 ### Viewing Data on SiliconWit.io
 
-If you already created a SiliconWit.io account (from the Getting Started section of the course index), your sensor data is already flowing to the platform if your MCU clients are configured to publish to SiliconWit.io's MQTT endpoint.
+If you took the optional hosted path in the earlier lessons, your MCU clients already publish to SiliconWit.io's MQTT endpoint and the readings are there.
 
 The SiliconWit.io dashboard provides:
 
@@ -1369,7 +1369,7 @@ Follow one sensor reading through the whole chain to check that every part works
 
 3. **Build the Chart.js dashboard and add a pressure chart.** Set up the Chart.js dashboard from this lesson and extend it with a third chart for pressure data. Add color-coded stat cards that turn red when temperature exceeds 40 C or humidity drops below 20%. Implement a "last updated" timestamp display that shows how many seconds ago the last MQTT message arrived. Serve the dashboard from a Raspberry Pi and verify it works on a phone browser over your local network.
 
-4. **Compare Grafana and SiliconWit.io side by side.** Configure your ESP32 (or simulated publisher) to publish to both your local Mosquitto broker and SiliconWit.io's MQTT endpoint simultaneously. Open both dashboards side by side: your self-hosted Grafana and the SiliconWit.io web interface. Document the differences in setup time, data latency, available panel types, and export options. Write a brief comparison table summarizing when you would choose each approach for a real project.
+4. **Optional: compare Grafana with a managed service.** If you have a SiliconWit.io device, configure your ESP32 (or simulated publisher) to publish to both your local Mosquitto broker and SiliconWit.io's MQTT endpoint simultaneously. Open both dashboards side by side: your self-hosted Grafana and the SiliconWit.io web interface. Document the differences in setup time, data latency, available panel types, and export options. Write a brief comparison table summarizing when you would choose each approach for a real project.
 
 ## Summary
 

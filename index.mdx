@@ -23,7 +23,7 @@ The embedded courses touched networking ([ESP32](/education/embedded-programming
   </Card>
 
   <Card title="Broker Infrastructure" icon="setting">
-    A broker is the backbone of any MQTT system. You will set up Mosquitto from scratch with TLS, authentication, ACLs, and persistence. You will also connect to cloud platforms like [SiliconWit.io](https://siliconwit.io), a connected operations platform that accepts MQTT connections and provides dashboards, alerts, automation, and REST API access. You will understand both self-hosted and managed options.
+    A broker is the backbone of any MQTT system. You will set up Mosquitto from scratch with TLS, authentication, ACLs, and persistence. You will also bridge selected topics to a remote broker: a second one you run, or a hosted service such as [SiliconWit.io](https://siliconwit.io), our monitoring service. You will understand both self-hosted and managed options.
   </Card>
 
   <Card title="End-to-End Visibility" icon="approve-check">
@@ -65,7 +65,7 @@ Each lesson follows a consistent cycle:
   </Card>
 
   <Card title="Lesson 2: MQTT Broker Setup and Secure Connections" icon="document">
-    [MQTT Broker Setup and Secure Connections](/education/iot-systems/mqtt-broker-setup-secure-connection/). Install and configure Mosquitto with TLS, password authentication, and topic ACLs. Connect to both your self-hosted broker and the SiliconWit.io connected operations platform. Understand retained messages, last will, QoS levels, and persistence.
+    [MQTT Broker Setup and Secure Connections](/education/iot-systems/mqtt-broker-setup-secure-connection/). Install and configure Mosquitto with TLS, password authentication, and topic ACLs. Bridge selected topics to a remote broker, your own or a hosted one. Understand retained messages, last will, QoS levels, and persistence.
     **Build:** Production-ready Mosquitto broker with TLS. **Parts:** Raspberry Pi or any Linux machine.
   </Card>
 
@@ -75,7 +75,7 @@ Each lesson follows a consistent cycle:
   </Card>
 
   <Card title="Lesson 4: Real-Time Dashboards and Data Visualization" icon="document">
-    [Real-Time Dashboards and Data Visualization](/education/iot-systems/realtime-dashboards-data-visualization/). Store MQTT data in InfluxDB via Telegraf, build Grafana dashboards with live charts and gauges, and explore the SiliconWit.io dashboard as a managed alternative. Query historical data and export reports.
+    [Real-Time Dashboards and Data Visualization](/education/iot-systems/realtime-dashboards-data-visualization/). Store MQTT data in InfluxDB via Telegraf, build Grafana dashboards with live charts and gauges, and compare them with a managed service such as SiliconWit.io. Query historical data and export reports.
     **Build:** Grafana dashboard with live sensor data. **Parts:** No new hardware.
   </Card>
 
@@ -85,7 +85,7 @@ Each lesson follows a consistent cycle:
   </Card>
 
   <Card title="Lesson 6: Alerts, Automation, and Rule Engines" icon="document">
-    [Alerts, Automation, and Rule Engines](/education/iot-systems/alerts-automation-rule-engines/). Configure threshold alerts that notify via email, SMS, Discord, Slack, and Telegram. Build automation flows with Node-RED that trigger actions based on sensor data. Compare self-hosted rule engines with the SiliconWit.io alert system.
+    [Alerts, Automation, and Rule Engines](/education/iot-systems/alerts-automation-rule-engines/). Configure threshold alerts that notify via email, SMS, Discord, Slack, and Telegram. Build automation flows with Node-RED that trigger actions based on sensor data. Compare self-hosted rule engines with managed alerts such as SiliconWit.io.
     **Build:** Multi-channel alert system with automation flows. **Parts:** No new hardware.
   </Card>
 
@@ -122,7 +122,7 @@ Each lesson follows a consistent cycle:
 | **Protocol** | MQTT vs CoAP vs HTTP, broker setup | Multi-MCU MQTT clients, topic design | REST API, webhooks, HMAC | Mutual TLS, X.509, provisioning |
 | **Infrastructure** | Mosquitto, TLS, ACLs | InfluxDB, Telegraf, Grafana | Node-RED, webhook servers | Production deployment, monitoring |
 | **Data** | JSON payloads, QoS levels | Time-series storage, queries | Automation rules, triggers | End-to-end pipeline, failover |
-| **Cloud** | Self-hosted vs SiliconWit.io | Dashboard comparison | Alert channels, integrations | Full production system |
+| **Cloud** | Self-hosted vs hosted broker | Dashboard comparison | Alert channels, integrations | Full production system |
 
 ## Prerequisites
 
@@ -146,7 +146,7 @@ Embedded programming experience required
 
 2. **Set up a Linux machine for the broker.** This can be your development PC, a Raspberry Pi, a VM, or a cloud VPS. Mosquitto, InfluxDB, and Grafana all run on any Linux distribution.
 
-3. **Create a free SiliconWit.io account.** Go to [siliconwit.io](https://siliconwit.io) and register. SiliconWit.io is a connected operations platform that accepts MQTT connections and provides dashboards, alerts, automation, remote control, and REST API access. The free tier gives you 3 devices with 7-day data retention, enough for all lessons.
+3. **Optional: a hosted account.** You can finish every lesson with your own Mosquitto, InfluxDB, Grafana and Node-RED. The lessons also show [SiliconWit.io](https://siliconwit.io) as one hosted option; register there only if you want to follow that path too.
 
 4. **Start with Lesson 1.** The protocol comparison gives you the mental model for every decision in the rest of the course.
 
@@ -154,7 +154,7 @@ Embedded programming experience required
 </Steps>
 
 :::tip[This is not a cloud-only course]
-Every lesson works with a self-hosted setup (your own Mosquitto, Grafana, Node-RED). SiliconWit.io is presented as a convenient managed alternative, not a requirement. You will understand both approaches and can choose what fits your project.
+Every lesson works with a self-hosted setup (your own Mosquitto, Grafana, Node-RED). SiliconWit.io is shown as one managed option, not a requirement. It works with any MQTT client, so a device moves between it and your own broker when you change the host, the credentials and the topics. You will understand both approaches and can choose what fits your project.
 :::
 
 <Copyright />

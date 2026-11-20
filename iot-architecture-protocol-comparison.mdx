@@ -293,8 +293,8 @@ const char* WIFI_PASS     = "YourPassword";
 const char* MQTT_SERVER   = "192.168.1.100";
 const int   MQTT_PORT     = 1883;
 
-/* Option B: SiliconWit.io (TLS on port 8883)
- * See siliconwit.io (Dashboard -> Devices) for connection details.
+/* Option B (optional): a TLS broker on port 8883, your own Mosquitto
+ * or SiliconWit.io (Dashboard -> Devices lists its connection details).
  * For TLS you need WiFiClientSecure instead of WiFiClient.
  */
 
@@ -395,9 +395,9 @@ void loop() {
 }
 ```
 
-### MQTT with TLS (SiliconWit.io)
+### MQTT with TLS (Optional)
 
-To connect to mqtt.siliconwit.io on port 8883 with TLS, replace `WiFiClient` with `WiFiClientSecure` and load the server's root CA certificate:
+This step is optional; the bench test above needs only your own Mosquitto. The same change connects to your own broker on port 8883 with the TLS setup of the [broker lesson](/education/iot-systems/mqtt-broker-setup-secure-connection/) (load your own `ca.crt`), or to `mqtt.siliconwit.io`, the broker of SiliconWit.io, our monitoring service. To connect on port 8883 with TLS, replace `WiFiClient` with `WiFiClientSecure` and load the server's root CA certificate:
 
 ```cpp title="mqtt_tls_snippet.ino"
 #include <WiFiClientSecure.h>
@@ -1271,12 +1271,12 @@ The `wifi_rssi` field helps you detect connectivity degradation before messages 
 
 Watch the size when you add fields. PubSubClient keeps each packet in a buffer of 256 bytes by default. The extended payload is 207 bytes, so with the bench topic the packet is 240 bytes: it fits, but two more fields do not, and then `publish()` returns false and nothing is sent. Call `mqttClient.setBufferSize(512)` before you connect, and always log the return value of `publish()`.
 
-## SiliconWit.io: Connected Operations Platform
+## Optional: SiliconWit.io as a Hosted Endpoint
 
 <InArticleAd />
 
 
-[SiliconWit.io](https://siliconwit.io) is a connected operations platform that provides real-time monitoring, dashboards, alerts (email, SMS, Slack, Discord, webhooks), remote device control, automation rules, AI analytics, and a REST API. It accepts data over all three protocols of this lesson: MQTT, CoAP, and HTTP.
+You do not need this section to finish the lesson. [SiliconWit.io](https://siliconwit.io) takes data over all three protocols of this lesson (MQTT, CoAP and HTTP) and keeps the record, the charts and the alerts. It works with any standard client of these protocols, so the code of this lesson moves between it and your own servers when you change the address, the credentials and the topic.
 
 ### Connection Summary
 
@@ -1286,7 +1286,7 @@ Watch the size when you add fields. PubSubClient keeps each packet in a buffer o
 | CoAP | coap.siliconwit.io | 5684 (DTLS) | Token in Uri-Query option |
 | HTTP | api.siliconwit.io | 443 (TLS) | API key in Authorization header |
 
-Connection details, certificates, and API keys are available after registration at [siliconwit.io](https://siliconwit.io) (Dashboard -> Devices). The free tier supports 3 devices with 7-day data retention, which is sufficient for all lessons in this course.
+Connection details, certificates, and API keys are on [siliconwit.io](https://siliconwit.io) (Dashboard -> Devices) after you register a device.
 
 ### Why Multiple Protocols Matter
 
@@ -1437,7 +1437,7 @@ mosquitto_pub -h localhost -t "test/hello" -m "world"
 
 6. **Collect at least 20 cycles** (5 minutes) for meaningful averages. Copy the serial output for analysis.
 
-7. **Optional: add TLS to MQTT.** Change the MQTT connection to use `mqtt.siliconwit.io:8883` with `WiFiClientSecure` and compare the TLS MQTT latency against plain MQTT. TLS adds latency only on the first connection; subsequent publishes on the same connection have minimal overhead.
+7. **Optional: add TLS to MQTT.** Change the MQTT connection to use port 8883 with `WiFiClientSecure`, on your own Mosquitto with TLS (or on `mqtt.siliconwit.io:8883` if you have a device there), and compare the TLS MQTT latency against plain MQTT. TLS adds latency only on the first connection; subsequent publishes on the same connection have minimal overhead.
 </Steps>
 
 ### Typical Results Summary

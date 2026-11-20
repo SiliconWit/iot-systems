@@ -50,7 +50,7 @@ The three nodes publish under one tree of topic names.
 ## What We Are Building
 
 <Card title="Three-MCU Sensor Network" icon="star">
-Three microcontroller nodes. Each reads a BME280 temperature and humidity sensor and publishes JSON to one MQTT broker, with the same topic pattern, payload format and QoS levels. You can watch all three from one `mosquitto_sub` session or from the SiliconWit.io dashboard.
+Three microcontroller nodes. Each reads a BME280 temperature and humidity sensor and publishes JSON to one MQTT broker, with the same topic pattern, payload format and QoS levels. You can watch all three from one `mosquitto_sub` session, or on SiliconWit.io if you take the optional hosted path.
 </Card>
 
 **Project specifications:**
@@ -60,7 +60,7 @@ Three microcontroller nodes. Each reads a BME280 temperature and humidity sensor
 | Platforms | ESP32 DevKitC, RPi Pico W, STM32F4 + ESP-01 |
 | Sensor | BME280 (I2C) on each platform |
 | Broker (self-hosted) | Mosquitto on port 1883 (plain) or 8883 (TLS) |
-| SiliconWit.io MQTT endpoint | mqtt.siliconwit.io:8883 (TLS, device token auth) |
+| SiliconWit.io MQTT endpoint (optional) | mqtt.siliconwit.io:8883 (TLS, device token auth) |
 | Topic pattern | `site/building/device_type/device_id/measurement` |
 | Payload format | JSON with device_id, timestamp, temperature, humidity |
 | Publish interval | Every 10 seconds |
@@ -108,9 +108,9 @@ factory/office/esp32/esp32-002/telemetry
 
 **Wildcards.** A subscriber can replace levels with two characters. `+` stands for exactly one level: `factory/+/esp32/+/telemetry` gives the ESP32 telemetry of all buildings. `#` stands for all levels that follow and must be last: `factory/warehouse-a/#` gives everything in the warehouse. A `+` never stands for two levels or for none, so a device that leaves out one level is invisible to every subscription that counts the levels.
 
-### SiliconWit.io Topic Mapping
+### SiliconWit.io Topic Mapping (Optional)
 
-The SiliconWit.io platform uses its own, shorter pattern with the device in the middle:
+[SiliconWit.io](https://siliconwit.io), our monitoring service, is an optional hosted broker in this course. It uses its own, shorter pattern with the device in the middle:
 
 ```
 d/{device_id}/t
@@ -525,9 +525,9 @@ void mqtt_publish_alert(const char *alert_type, float value, float threshold)
 }
 ```
 
-### Connecting to SiliconWit.io
+### Connecting to SiliconWit.io (Optional)
 
-To connect to SiliconWit.io instead of your self-hosted Mosquitto, change the broker configuration:
+Skip this if you use only your own broker. To connect to SiliconWit.io instead of your self-hosted Mosquitto, change the broker configuration:
 
 ```c title="mqtt_handler_siliconwit.c (config section)"
 /* SiliconWit.io connection configuration */
@@ -672,7 +672,7 @@ TOPIC_ALERTS = f"{TOPIC_BASE}/alerts"
 TOPIC_COMMANDS = f"{TOPIC_BASE}/commands"
 TOPIC_STATUS = f"{TOPIC_BASE}/status"
 
-# SiliconWit.io settings (alternative cloud platform)
+# SiliconWit.io settings (optional hosted broker)
 SILICONWIT_BROKER = "mqtt.siliconwit.io"
 SILICONWIT_PORT = 8883
 SILICONWIT_DEVICE_ID = "your-siliconwit-device-id"
@@ -951,9 +951,9 @@ if __name__ == "__main__":
     main()
 ```
 
-### Connecting Pico to SiliconWit.io
+### Connecting Pico to SiliconWit.io (Optional)
 
-To use SiliconWit.io, create a second client configuration:
+To use the optional hosted broker, create a second client configuration:
 
 ```python title="main.py (SiliconWit.io variant)"
 # Replace the MQTTClient initialization in mqtt_client.py with:
@@ -2068,9 +2068,9 @@ To verify the reconnection and buffering logic:
    The ESP32 serial monitor should show that it received the command and set the interval to 30 seconds, and the readings in `mosquitto_sub` should now come 30 seconds apart. Send `"value":0` as well: the device must refuse it and keep 30, because an interval of 0 would publish without pause.
 </Steps>
 
-### Testing with SiliconWit.io
+### Testing with SiliconWit.io (Optional)
 
-To verify the SiliconWit.io connection:
+If you took the optional hosted path, verify the SiliconWit.io connection:
 
 <Steps>
 1. **Log in to [siliconwit.io](https://siliconwit.io)** and create a device. Copy the device ID and access token.
@@ -2079,7 +2079,7 @@ To verify the SiliconWit.io connection:
 
 3. **Flash and run.** The device should connect to `mqtt.siliconwit.io:8883` and publish to the `d/{device_id}/t` topic.
 
-4. **Check the SiliconWit.io dashboard.** Your telemetry data should appear on the device's data page within a few seconds.
+4. **Check the device page on SiliconWit.io.** Your telemetry data should appear on the device's data page within a few seconds.
 </Steps>
 
 ## Summary
@@ -2118,7 +2118,7 @@ Next, the lesson on [real-time dashboards](/education/iot-systems/realtime-dashb
 
 **Exercise 3: Test the offline buffer.** Disconnect the Wi-Fi for 5 minutes while all three devices run. Reconnect, count the readings that each device sends from its buffer, and explain any that are missing. Try flush delays of 10 ms, 50 ms and 200 ms and observe whether the broker drops messages.
 
-**Exercise 4: Two destinations.** Change one client so that it connects to your own Mosquitto broker and to the SiliconWit.io MQTT endpoint at the same time, with two client instances that reconnect independently. Record the extra RAM and processor use.
+**Exercise 4: Two destinations.** Change one client so that it connects to your own Mosquitto broker and to a second broker (another Mosquitto, or the SiliconWit.io MQTT endpoint) at the same time, with two client instances that reconnect independently. Record the extra RAM and processor use.
 
 <IoTSystemsComments />
 

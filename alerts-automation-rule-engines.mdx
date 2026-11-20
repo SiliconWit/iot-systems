@@ -1,10 +1,10 @@
 ---
 title: "Alerts, Automation, and Rule Engines"
-description: "Configure threshold alerts that notify via email, SMS, Discord, Slack, and Telegram. Build automation flows with Node-RED that trigger actions based on sensor data. Compare self-hosted rule engines with the SiliconWit.io alert system."
+description: "Configure threshold alerts that notify via email, SMS, Discord, Slack, and Telegram. Build automation flows with Node-RED that trigger actions based on sensor data. Compare self-hosted rule engines with managed alerts such as SiliconWit.io."
 contributors: "sam-macharia,lawrence-langat,john-kibe"
 pubDate: 2026-03-10
 tags: ["iot", "alerts", "automation", "node-red", "mqtt", "notifications", "rule-engine", "grafana", "siliconwit-io"]
-excerpt: "Configure threshold alerts that notify via email, SMS, Discord, Slack, and Telegram. Build automation flows with Node-RED that trigger actions based on sensor data. Compare self-hosted rule engines with the SiliconWit.io alert system."
+excerpt: "Configure threshold alerts that notify via email, SMS, Discord, Slack, and Telegram. Build automation flows with Node-RED that trigger actions based on sensor data. Compare self-hosted rule engines with managed alerts such as SiliconWit.io."
 heroImage: "https://cdn.siliconwit.com/education/iot-systems/alerts-automation-rule-engines.png"
 ---
 
@@ -25,7 +25,7 @@ import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/sta
 
 import IoTSystemsComments from '../../../../components/iot-systems/IoTSystemsComments.astro';
 
-A freezer compressor fails at 3 in the morning. The chart shows it clearly, and nobody is looking at the chart. An alert sends the fact to a person. But an alert that fires every night for no reason is ignored on the night that matters, so most of the work is in choosing the rule. In this lesson you choose rules that people will trust, build a Python alert engine that checks them against live MQTT data, send alerts through five channels, build automation flows with Node-RED, and compare these with the managed alerts on SiliconWit.io. #Alerts #Automation #NodeRED
+A freezer compressor fails at 3 in the morning. The chart shows it clearly, and nobody is looking at the chart. An alert sends the fact to a person. But an alert that fires every night for no reason is ignored on the night that matters, so most of the work is in choosing the rule. In this lesson you choose rules that people will trust, build a Python alert engine that checks them against live MQTT data, send alerts through five channels, build automation flows with Node-RED, and compare these with managed alerts. #Alerts #Automation #NodeRED
 
 ## Why Alerting Matters
 
@@ -804,17 +804,17 @@ The single message of the first test only starts the 30-second timer. The loop o
 
 **Check it.** Count the alerts, not just their presence. The loop sends 12 readings 5 seconds apart, so the timer starts at the first and the seventh (30 seconds later) fires the alert: one `ALERT` line about 30 seconds after the loop starts, then silence for the 5 minutes of cooldown, although five more readings are above the limit. Then publish `{"temperature": null}`: the engine must skip it and keep running. A second alert inside the cooldown, or an engine that stops, means the rule or the code is wrong.
 
-## SiliconWit.io Alert System
+## Optional: Managed Alerts on SiliconWit.io
 
 <InArticleAd />
 
 
-If you do not want to run your own alert engine, [SiliconWit.io](https://siliconwit.io) provides a fully managed alert system. It supports all the alert types we discussed (threshold, status, geofence, inactivity) and delivers notifications via email, SMS, and webhooks. It also includes escalation chains, cooldown periods, and active-hours scheduling out of the box.
+This section is optional; the Python engine above and Node-RED below need no account. If you would rather not run your own alert engine, [SiliconWit.io](https://siliconwit.io), our monitoring service, runs the same kinds of rules (threshold, status, geofence, inactivity) and sends the notice by email, SMS or webhook, with cooldown periods, escalation and active hours. It takes readings from any MQTT client.
 
 ### Setting Up a Threshold Alert on SiliconWit.io
 
 <Steps>
-1. **Log in to your SiliconWit.io dashboard** and navigate to the device that is publishing sensor data.
+1. **Log in to SiliconWit.io** and navigate to the device that is publishing sensor data.
 
 2. **Go to Alerts.** Click the **Alerts** tab in the left sidebar, then click **Create Alert**.
 
@@ -826,10 +826,6 @@ If you do not want to run your own alert engine, [SiliconWit.io](https://silicon
 
 6. **Save and test.** Click **Save**. Publish a test value above the threshold from your device or with `mosquitto_pub`. You should receive a notification within seconds.
 </Steps>
-
-:::note[SiliconWit.io free tier]
-The free tier supports up to 3 alert rules with email notifications. Upgrade for SMS, webhooks, escalation chains, and unlimited rules.
-:::
 
 ## Node-RED: Visual Flow-Based Automation
 
@@ -1328,7 +1324,7 @@ For simple "value above X" alerts, Grafana works well. For anything more complex
 
   <Card title="SiliconWit.io Alerts" icon="star">
     **Best for:** Quick setup, managed infrastructure, small to medium deployments.
-    Zero infrastructure to maintain. Alerts, dashboards, and device management in one platform. Supports threshold, status, geofence, and inactivity alerts with email, SMS, and webhook notifications. Limited customization compared to a self-hosted engine.
+    No alert server of your own to maintain. Supports threshold, status, geofence, and inactivity alerts with email, SMS, and webhook notifications. Limited customization compared to a self-hosted engine.
   </Card>
 
   <Card title="Grafana Alerting" icon="seti:config">
@@ -1348,9 +1344,9 @@ For simple "value above X" alerts, Grafana works well. For anything more complex
 | Visual editor | No | Yes | Yes | Partial |
 | Maintenance burden | High | Medium | None | Medium |
 | Scalability | High | Medium | High | Medium |
-| Cost | Free | Free | Free tier / paid | Free |
+| Cost | Free | Free | Plan per device | Free |
 
-For this course, start with SiliconWit.io, build the Python engine when you need custom logic, and use Node-RED when a rule must send MQTT commands to fans, valves or relays. In every case the device keeps its own limits.
+For this course, start with the Python engine, which you can read and test line by line, and use Node-RED when a rule must send MQTT commands to fans, valves or relays. A managed service such as SiliconWit.io suits you when you would rather not run the alert engine yourself. In every case the device keeps its own limits.
 
 ## Exercises
 
@@ -1386,9 +1382,9 @@ Build a Node-RED flow that monitors two sensors and controls two actuators.
 - Your exported Node-RED flow JSON
 - Debug sidebar output with messages on both paths
 
-### Exercise 3: SiliconWit.io Alert Configuration
+### Exercise 3: Managed Alert Configuration (Optional)
 
-Set up alerts on the SiliconWit.io platform for your sensor data.
+This exercise needs a SiliconWit.io device; without one, build the same three rules in your Python engine or in Node-RED. Set up alerts on SiliconWit.io for your sensor data.
 
 **Requirements:**
 - Create a threshold alert for temperature (above 35 C, sustained 30 seconds, cooldown 5 minutes)

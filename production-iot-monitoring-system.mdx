@@ -1,10 +1,10 @@
 ---
 title: "Capstone: Production IoT Monitoring System"
-description: "Combine everything from the IoT Systems course into a production deployment: multiple sensor nodes, TLS-secured MQTT broker, time-series database, Grafana dashboards, automated alerts, a REST API, and cloud forwarding to SiliconWit.io."
+description: "Combine everything from the IoT Systems course into a production deployment: multiple sensor nodes, TLS-secured MQTT broker, time-series database, Grafana dashboards, automated alerts, a REST API, and optional forwarding to an off-site broker."
 contributors: "sam-macharia,lawrence-langat,john-kibe"
 pubDate: 2026-03-10
 tags: ["iot", "mqtt", "production", "grafana", "influxdb", "docker", "capstone", "esp32", "raspberry-pi", "siliconwit-io"]
-excerpt: "Deploy a complete production IoT monitoring system with multiple sensor nodes, a TLS-secured Mosquitto broker, InfluxDB and Grafana for time-series visualization, threshold and inactivity alerts via Slack, a Flask REST API, and cloud forwarding to SiliconWit.io. This capstone ties together every lesson in the IoT Systems course and every skill from the embedded programming series."
+excerpt: "Deploy a complete production IoT monitoring system with multiple sensor nodes, a TLS-secured Mosquitto broker, InfluxDB and Grafana for time-series visualization, threshold and inactivity alerts via Slack, a Flask REST API, and optional forwarding to an off-site broker. This capstone ties together every lesson in the IoT Systems course and every skill from the embedded programming series."
 heroImage: "https://cdn.siliconwit.com/education/iot-systems/production-iot-monitoring-system.png"
 ---
 
@@ -51,7 +51,7 @@ The system monitors a greenhouse with three sensor nodes, each on a different mi
 - Telegraf subscribes to the MQTT topics and writes the readings into InfluxDB, and Grafana draws them.
 - A Flask REST API lists devices, serves history and publishes commands.
 - Node-RED checks the alert rules and sends the messages.
-- The broker also forwards the readings to SiliconWit.io. That copy can still be read when the local computer is down.
+- Optionally, the broker also forwards the readings to an off-site broker: a second one you run, or [SiliconWit.io](https://siliconwit.io), our monitoring service. That copy can still be read when the local computer is down.
 
 ### Architecture
 
@@ -67,9 +67,10 @@ The first drawing shows how readings arrive. Every node speaks only to the broke
 │ light, PIR   │  │    │ TLS, ACLs  │
 └──────────────┘  │    └─────┬──────┘
 ┌──────────────┐  │          │ MQTT bridge (TLS)
-│ STM32 node   │──┘          ▼
+│ STM32 node   │──┘          ▼ (optional)
 │ air quality  │       ┌───────────────┐
-└──────────────┘       │ SiliconWit.io │
+└──────────────┘       │ off-site      │
+                       │ broker        │
                        └───────────────┘
 ```
 
@@ -104,7 +105,7 @@ The second drawing shows the local services that use the readings. The Flask API
   </Card>
 
   <Card title="Mosquitto Broker" icon="setting">
-    TLS 1.2 with server certificates, password authentication, topic ACLs that restrict each device to its own publish prefix, persistent sessions, and an MQTT bridge that forwards all sensor data to SiliconWit.io.
+    TLS 1.2 with server certificates, password authentication, topic ACLs that restrict each device to its own publish prefix, persistent sessions, and an optional MQTT bridge that forwards the sensor data off site.
   </Card>
 
   <Card title="Telegraf + InfluxDB" icon="document">
@@ -123,13 +124,13 @@ The second drawing shows the local services that use the readings. The Flask API
     Threshold alerts (temperature above 35C, humidity below 20%), inactivity alerts (no data from a node for 5 minutes), and notifications via Slack webhook.
   </Card>
 
-  <Card title="SiliconWit.io Cloud" icon="rocket">
-    Data forwarded via MQTT bridge appears on SiliconWit.io dashboards automatically. You can see the greenhouse from another place, even when the local Grafana cannot be reached.
+  <Card title="Off-Site Copy (Optional)" icon="rocket">
+    The MQTT bridge forwards the readings to a second broker you run elsewhere, or to SiliconWit.io. You can see the greenhouse from another place, even when the local Grafana cannot be reached.
   </Card>
 </CardGrid>
 
 :::tip[Instrument it]
-Placement decides whether the readings are real. Put a capacitive soil moisture probe (not a resistive one, it corrodes) in the root zone, away from the dripper, so that it reads the bed and not the last watering. Keep air temperature and humidity at the height of the leaves, in a small shield, shaded from the sun and clear of vents. Good, cheap parts: an SHT31 or BME280 for temperature and humidity, a BH1750 for light in lux (far better than a bare LDR), and an SCD41 if you want true CO2. An [ESP32](/education/sensor-actuator-interfacing-stm32/) reads them all over I2C. The node itself can water when the bed dries and vent when the air overheats, with its own limits in its firmware, while it [streams](/education/iot-systems/) the readings to a live [dashboard](https://siliconwit.io) for oversight.
+Placement decides whether the readings are real. Put a capacitive soil moisture probe (not a resistive one, it corrodes) in the root zone, away from the dripper, so that it reads the bed and not the last watering. Keep air temperature and humidity at the height of the leaves, in a small shield, shaded from the sun and clear of vents. Good, cheap parts: an SHT31 or BME280 for temperature and humidity, a BH1750 for light in lux (far better than a bare LDR), and an SCD41 if you want true CO2. An [ESP32](/education/sensor-actuator-interfacing-stm32/) reads them all over I2C. The node itself can water when the bed dries and vent when the air overheats, with its own limits in its firmware, while it [streams](/education/iot-systems/) the readings to the broker, and through it to the Grafana dashboard, for oversight.
 :::
 
 ## MQTT Topic Hierarchy
@@ -170,7 +171,7 @@ greenhouse/cmd/[node-id]              (commands from API)
 
 ### Mosquitto with TLS and ACLs
 
-The broker runs in a Docker container with TLS certificates, password authentication, and topic ACLs. The last block of the file is the bridge that forwards the readings to SiliconWit.io.
+The broker runs in a Docker container with TLS certificates, password authentication, and topic ACLs. The last block of the file is the optional bridge that forwards the readings off site; here it points at SiliconWit.io. Delete the block to run the system with no account, or change `address`, the credentials and the remote topic to bridge to a second Mosquitto that you run.
 
 ```ini title="mosquitto/mosquitto.conf"
 # Listener with TLS
@@ -194,7 +195,8 @@ persistence_location /mosquitto/data/
 log_dest file /mosquitto/log/mosquitto.log
 log_type all
 
-# Bridge to SiliconWit.io
+# Optional: bridge to an off-site broker (here SiliconWit.io).
+# Delete this block to run the system local only.
 connection siliconwit-bridge
 address mqtt.siliconwit.io:8883
 bridge_cafile /mosquitto/certs/siliconwit-ca.crt
@@ -1675,8 +1677,8 @@ paho-mqtt>=2.0.0
 2. **Generate Mosquitto passwords.**
    Run the `mosquitto_passwd` commands shown earlier to create credentials for all seven users (three sensor nodes, Telegraf, the API server, Node-RED, and the Docker health check).
 
-3. **Configure your SiliconWit.io bridge credentials.**
-   Log in to [siliconwit.io](https://siliconwit.io), create a device, and copy the MQTT username and token into `mosquitto.conf` under the bridge section.
+3. **Optional: configure the off-site bridge.**
+   For SiliconWit.io, log in to [siliconwit.io](https://siliconwit.io), create a device, and copy the MQTT username and token into `mosquitto.conf` under the bridge section. For a second Mosquitto of your own, put its address and a user of its own there. With no off-site broker, delete the bridge block.
 
 4. **Start the Docker stack.**
    ```bash
@@ -1728,7 +1730,7 @@ paho-mqtt>=2.0.0
     Open `http://localhost:1880`. The flow file is pre-loaded. Update the Slack webhook URL in the HTTP request node. Deploy the flow and verify alerts fire when thresholds are exceeded.
 
 11. **Verify end-to-end data flow.**
-    Confirm that sensor data flows from each node through the broker, into InfluxDB via Telegraf, and appears on the Grafana dashboard. Confirm that the same data appears on your SiliconWit.io dashboard via the MQTT bridge.
+    Confirm that sensor data flows from each node through the broker, into InfluxDB via Telegraf, and appears on the Grafana dashboard. If you set up the off-site bridge, confirm that the same data arrives there.
 
 12. **Run failure tests** (see the next section).
 </Steps>
@@ -1776,37 +1778,39 @@ This simulates a complete infrastructure failure. Shut down the entire Docker ho
 
 **Expected behavior:**
 - All local services (broker, InfluxDB, Grafana, Node-RED, API) go down.
-- The SiliconWit.io cloud still has all data up to the moment of failure, because the MQTT bridge was forwarding in real time.
-- You can log into [siliconwit.io](https://siliconwit.io) from any device and see the last known readings for all sensor nodes.
+- With the optional bridge, the off-site broker still has all data up to the moment of failure, because the bridge was forwarding in real time.
+- From any device you can then see the last known readings for all sensor nodes there.
 - When the host comes back online, `docker compose up -d` starts all services. Sensor nodes reconnect, and data flow resumes.
 
-With the whole local system down, you can still see the last readings on SiliconWit.io. Notice what you do not get: nothing on the dead host can tell you that it is dead. That message must come from outside it.
+With no bridge, nothing shows the readings while the host is down. Notice what you do not get: nothing on the dead host can tell you that it is dead. That message must come from outside it.
 
 ### Test 4: Network Partition
 
 Disconnect the broker host from the internet (unplug the Ethernet cable or disable Wi-Fi on the host).
 
 **Expected behavior:**
-- The MQTT bridge to SiliconWit.io drops, but the local broker continues operating normally.
+- The MQTT bridge to the off-site broker (if you set one up) drops, but the local broker continues operating normally.
 - Sensor nodes are on the same LAN, so they keep publishing to the local broker.
 - InfluxDB and Grafana continue receiving and displaying data.
-- When the internet connection is restored, the MQTT bridge reconnects to SiliconWit.io automatically.
+- When the internet connection is restored, the MQTT bridge reconnects automatically.
 - Messages published during the outage are queued by the local broker (the bridge topic uses QoS 1 and the bridge session is persistent by default) and are forwarded when the bridge reconnects. The queue holds up to `max_queued_messages` (1000 by default); messages beyond that limit are dropped.
 
-## SiliconWit.io as the Cloud Layer
+## An Off-Site Copy (Optional)
 
 <InArticleAd />
 
 
-The MQTT bridge in `mosquitto.conf` forwards each node's JSON summary to SiliconWit.io as it is published. That live copy gives you five things:
+The system is complete without this section. The optional MQTT bridge in `mosquitto.conf` forwards each node's JSON summary off site as it is published: to a second Mosquitto (with its own InfluxDB and Grafana) on a small server that you run, or to SiliconWit.io. That live copy gives you five things:
 
-- **A view from another place.** Log into [siliconwit.io](https://siliconwit.io) from a phone or any browser. No VPN, no port forwarding, no dynamic DNS.
-- **A second view.** If the local Grafana cannot be reached (power cut, network fault, server crash), SiliconWit.io still has the last state of every sensor.
-- **An alert from outside.** When the local host is down, Node-RED sends nothing, and a rule on SiliconWit.io can still notice the silence and tell you.
-- **Sharing.** Give a colleague, an agronomist or a client read access on SiliconWit.io without opening your local network.
-- **A longer history.** SiliconWit.io keeps data according to your plan, so you can compare this week with last month after the local InfluxDB has deleted the older data.
+- **A view from another place.** Open the off-site Grafana or SiliconWit.io from a phone or any browser. No VPN, no port forwarding, no dynamic DNS.
+- **A second view.** If the local Grafana cannot be reached (power cut, network fault, server crash), the off-site copy still has the last state of every sensor.
+- **An alert from outside.** When the local host is down, Node-RED sends nothing, and a rule off site can still notice the silence and tell you.
+- **Sharing.** Give a colleague, an agronomist or a client read access off site without opening your local network.
+- **A longer history.** The off-site copy can keep data longer, so you can compare this week with last month after the local InfluxDB has deleted the older data.
 
-In the bridge, `topic "" out 1 greenhouse/esp32-node/json d/YOUR_DEVICE_ID/t` forwards one local topic, outward only, with QoS 1, to the device's telemetry topic on SiliconWit.io. A plain `topic greenhouse/# out 1` would send the readings under local names that the platform does not take as telemetry, one bare number each. So add to each node one JSON summary publish, such as `{"temperature":23.5,"humidity":61.2,"pressure":1013.2,"soil_moisture":42}` on `greenhouse/esp32-node/json` (its ACL allows it; Telegraf skips it as not a number), and give each node its own device and `connection` block, as the broker lesson shows. The failure tests below assume this is done.
+Both paths take the same MQTT bridge, so you can move from one to the other by changing the address, the credentials and the remote topic.
+
+In the bridge, `topic "" out 1 greenhouse/esp32-node/json d/YOUR_DEVICE_ID/t` forwards one local topic, outward only, with QoS 1, to the device's telemetry topic on SiliconWit.io. A plain `topic greenhouse/# out 1` would send the readings under local names that SiliconWit.io does not take as telemetry, one bare number each. So add to each node one JSON summary publish, such as `{"temperature":23.5,"humidity":61.2,"pressure":1013.2,"soil_moisture":42}` on `greenhouse/esp32-node/json` (its ACL allows it; Telegraf skips it as not a number), and give each node its own device and `connection` block, as the broker lesson shows. The failure tests above assume this is done if you use the bridge. A second Mosquitto of your own takes `topic greenhouse/# out 1` as it is.
 
 ## Production Hardening
 
@@ -1862,7 +1866,7 @@ If InfluxDB crashes or Grafana stops answering, who alerts you? The monitoring s
 
 **Approach 1: External uptime checks.** A service such as UptimeRobot or Healthchecks.io, or a cron job on another machine, calls the Flask API's `/api/health` every minute and sends an email or SMS when it gets no answer.
 
-**Approach 2: SiliconWit.io as the watchdog.** An inactivity alert on SiliconWit.io (no data from the bridge for 10 minutes) tells you that something in the local system is wrong.
+**Approach 2: the off-site copy as the watchdog.** An inactivity alert off site (no data from the bridge for 10 minutes), on your second broker or on SiliconWit.io, tells you that something in the local system is wrong.
 
 ```bash title="Simple cron-based health check"
 # Add to crontab on a separate machine
@@ -1916,7 +1920,7 @@ At 1,000 nodes, the single Mosquitto instance may become a bottleneck. MQTT brid
 | Broker | Raspberry Pi (free) | Single VM (10 USD a month) | 3-node cluster (90 USD a month) |
 | InfluxDB | Same Pi | Dedicated VM (20 USD a month) | InfluxDB Cloud (100 USD a month or more) |
 | Grafana | Same Pi | Same VM | Grafana Cloud (50 USD a month) |
-| SiliconWit.io | Free tier | Paid plan, billed per device | Enterprise plan |
+| Off-site copy (optional) | Second broker on a small VM, or a SiliconWit.io plan | A plan billed per device, or your own VM | Your own cluster, or an enterprise plan |
 | Total infra | about 0 USD a month | about 30 USD a month | 240 USD a month or more |
 
 These are rough estimates. The same topic plan, Telegraf pipeline and Grafana queries work at each scale, with changes of configuration and no rewrite.
@@ -1931,7 +1935,7 @@ This capstone uses every lesson of the IoT Systems course and skills from the em
 | Skill | Where You Learned It | How You Used It Here |
 |-------|---------------------|---------------------|
 | Protocol selection (MQTT vs HTTP vs CoAP) | This course | Chose MQTT for all sensor-to-broker communication |
-| Broker setup, TLS, ACLs, bridging | This course | Configured Mosquitto with TLS, per-device ACLs, SiliconWit.io bridge |
+| Broker setup, TLS, ACLs, bridging | This course | Configured Mosquitto with TLS, per-device ACLs, an optional off-site bridge |
 | Multi-MCU MQTT clients | This course | Wrote firmware for ESP32, Pico W, and STM32 nodes |
 | Time-series storage and dashboards | This course | Deployed Telegraf, InfluxDB, and Grafana with production queries |
 | REST API and device integration | This course | Built a Flask API for data access and command dispatch |
@@ -1957,7 +1961,7 @@ Add over-the-air firmware update capability to the ESP32 node. The node should c
 </Card>
 
 <Card title="Exercise 2: Add an Edge Gateway with Embedded Linux" icon="pencil">
-Deploy a Raspberry Pi running a custom Yocto or Buildroot image (from the [Embedded Linux](/education/embedded-linux-rpi/) course) as an edge gateway between the sensor nodes and the cloud. The edge gateway should run a local Mosquitto instance that the sensor nodes publish to over the LAN, perform local data aggregation (compute 5-minute averages), forward aggregated data to SiliconWit.io (reducing cloud bandwidth), cache raw data locally in SQLite for 7 days, and continue operating even when the internet is down. This exercise combines the [Embedded Linux course's](/education/embedded-linux-rpi/) custom image building with the IoT Systems course's broker bridging.
+Deploy a Raspberry Pi running a custom Yocto or Buildroot image (from the [Embedded Linux](/education/embedded-linux-rpi/) course) as an edge gateway between the sensor nodes and the cloud. The edge gateway should run a local Mosquitto instance that the sensor nodes publish to over the LAN, perform local data aggregation (compute 5-minute averages), forward aggregated data to the off-site broker (reducing cloud bandwidth), cache raw data locally in SQLite for 7 days, and continue operating even when the internet is down. This exercise combines the [Embedded Linux course's](/education/embedded-linux-rpi/) custom image building with the IoT Systems course's broker bridging.
 </Card>
 
 <Card title="Exercise 3: Multi-Channel Alert Escalation" icon="pencil">
